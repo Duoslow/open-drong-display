@@ -25,9 +25,18 @@ Environment:
 #include <string>
 #include <thread>
 
+#include <mfapi.h>
+#include <mferror.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <strmif.h>
+
 #include "core/Factory.h"
 #include "components/VideoConverter.h"
 #include "components/VideoEncoderVCE.h"
+
+#include <initguid.h> // defines the CODECAPI_* GUIDs used below
+#include <codecapi.h>
 
 using namespace std;
 using namespace Microsoft::IndirectDisp;
@@ -272,9 +281,25 @@ bool DongleUsb::WriteLocked(const BYTE* Data, size_t Len, ULONG TimeoutMs)
     return Xfer(m_Out, m_Scratch.data(), (ULONG)Padded, TimeoutMs) == (long)Padded;
 }
 
+// Stops all writes after the one in flight has completed. A frame cut off in the middle (cancelled transfer) can
+// crash the dongle's firmware until it is power-cycled, so this runs before Windows tears the pipes down.
+void DongleUsb::Close()
+{
+    std::lock_guard<std::mutex> g(m_WriteLock);
+    m_Closed = true;
+}
+
+void DongleUsb::Resume()
+{
+    std::lock_guard<std::mutex> g(m_WriteLock);
+    m_Closed = false;
+}
+
 bool DongleUsb::Cmd(ULONG Cmd, ULONG A1, ULONG A2, const BYTE* Payload, size_t PayloadLen)
 {
     std::lock_guard<std::mutex> g(m_WriteLock);
+    if (m_Closed)
+        return false;
     BYTE h[24] = {};
     PutBE(h, Cmd), PutBE(h + 4, A1), PutBE(h + 12, A2);
     if (!WriteLocked(h, sizeof h, 3000))
@@ -285,6 +310,8 @@ bool DongleUsb::Cmd(ULONG Cmd, ULONG A1, ULONG A2, const BYTE* Payload, size_t P
 bool DongleUsb::SendFrame(const BYTE* Au, size_t Total, ULONG W, ULONG H)
 {
     std::lock_guard<std::mutex> g(m_WriteLock);
+    if (m_Closed)
+        return false;
     ULONG n = (ULONG)max<size_t>(1, (Total + proto::CHUNK - 1) / proto::CHUNK);
     for (ULONG i = 0; i < n; i++)
     {
@@ -480,40 +507,52 @@ void DongleSession::Run()
 
 #pragma endregion
 
-#pragma region Encoder (AMD AMF)
+#pragma region Encoders
 
-struct Encoder
+// Common interface: encode one BGRA texture (the copy of Windows' frame) into one H.264 access unit (Annex-B,
+// SPS/PPS in front of every IDR).
+struct FrameEncoder
+{
+    virtual ~FrameEncoder() = default;
+    virtual const char* Name() const = 0;
+    virtual HRESULT Encode(ID3D11Texture2D* Bgra, bool ForceIdr) = 0;
+
+    std::vector<BYTE> Au;
+    UINT Width = 0, Height = 0;
+};
+
+static constexpr amf_int64 kBitrate = 15'000'000;
+
+// ---- AMD AMF ---------------------------------------------------------------------------------------------------
+
+struct AmfEncoder : FrameEncoder
 {
     amf::AMFFactory* Factory = nullptr;
     amf::AMFContextPtr Context;
     amf::AMFComponentPtr Converter, Encoder;
-    std::vector<BYTE> Au;
-    UINT Width = 0, Height = 0;
 
-    ~Encoder() { Close(); }
+    const char* Name() const override { return "AMD AMF"; }
 
-    void Close()
+    ~AmfEncoder() override
     {
-        if (Encoder) Encoder->Terminate(), Encoder = nullptr;
-        if (Converter) Converter->Terminate(), Converter = nullptr;
-        if (Context) Context->Terminate(), Context = nullptr;
+        if (Encoder) Encoder->Terminate();
+        if (Converter) Converter->Terminate();
+        if (Context) Context->Terminate();
     }
 
     HRESULT Init(ID3D11Device* Dev, UINT W, UINT H)
     {
-        Close();
-        static HMODULE Lib = LoadLibraryW(AMF_DLL_NAME);
+        HMODULE Lib = LoadLibraryW(AMF_DLL_NAME);
         if (!Lib)
         {
-            DrongLog("amfrt64.dll not found (AMD driver missing?)");
-            return E_FAIL;
+            return E_NOINTERFACE; // no AMD driver
         }
         auto InitFn = (AMFInit_Fn)GetProcAddress(Lib, AMF_INIT_FUNCTION_NAME);
         auto QueryFn = (AMFQueryVersion_Fn)GetProcAddress(Lib, AMF_QUERY_VERSION_FUNCTION_NAME);
         amf_uint64 Rt = 0;
         if (QueryFn)
             QueryFn(&Rt);
-        AMF_RESULT r = InitFn(min<amf_uint64>(Rt ? Rt : AMF_FULL_VERSION, AMF_FULL_VERSION), &Factory);
+        AMF_RESULT r = InitFn ? InitFn(min<amf_uint64>(Rt ? Rt : AMF_FULL_VERSION, AMF_FULL_VERSION), &Factory) : AMF_FAIL;
         if (r == AMF_OK) r = Factory->CreateContext(&Context);
         if (r == AMF_OK) r = Context->InitDX11(Dev);
         if (r == AMF_OK) r = Factory->CreateComponent(Context, AMFVideoConverter, &Converter);
@@ -528,15 +567,14 @@ struct Encoder
         if (r == AMF_OK) r = Factory->CreateComponent(Context, AMFVideoEncoderVCE_AVC, &Encoder);
         if (r == AMF_OK)
         {
-            const amf_int64 Bitrate = 15'000'000;
             Encoder->SetProperty(AMF_VIDEO_ENCODER_USAGE, AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_BASELINE);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_FRAMESIZE, AMFConstructSize((amf_int32)W, (amf_int32)H));
             Encoder->SetProperty(AMF_VIDEO_ENCODER_FRAMERATE, AMFConstructRate(kRefresh, 1));
             Encoder->SetProperty(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR);
-            Encoder->SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, Bitrate);
-            Encoder->SetProperty(AMF_VIDEO_ENCODER_PEAK_BITRATE, Bitrate * 2);
-            Encoder->SetProperty(AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE, Bitrate / kRefresh * 2);
+            Encoder->SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, kBitrate);
+            Encoder->SetProperty(AMF_VIDEO_ENCODER_PEAK_BITRATE, kBitrate * 2);
+            Encoder->SetProperty(AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE, kBitrate / kRefresh * 2);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_FILLER_DATA_ENABLE, false);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_QUALITY_PRESET, AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_B_PIC_PATTERN, (amf_int64)0);
@@ -551,17 +589,14 @@ struct Encoder
         }
         if (r != AMF_OK)
         {
-            DrongLog("AMF encoder init failed (%d)", (int)r);
-            Close();
+            DrongLog("AMF init failed (%d)", (int)r);
             return E_FAIL;
         }
         Width = W, Height = H;
-        DrongLog("AMF encoder ready %ux%u", W, H);
         return S_OK;
     }
 
-    // Encodes one BGRA texture synchronously into Au (Annex-B access unit).
-    HRESULT Encode(ID3D11Texture2D* Tex, bool ForceIdr)
+    HRESULT Encode(ID3D11Texture2D* Tex, bool ForceIdr) override
     {
         amf::AMFSurfacePtr In;
         if (Context->CreateSurfaceFromDX11Native(Tex, &In, nullptr) != AMF_OK || Converter->SubmitInput(In) != AMF_OK)
@@ -613,6 +648,553 @@ struct Encoder
         return false;
     }
 };
+
+// ---- Media Foundation (any GPU vendor's hardware encoder, or Microsoft's software encoder) ---------------------
+
+// BGRA -> NV12 (BT.709, limited range) on the GPU with the D3D11 video processor; every vendor implements it.
+struct Nv12Converter
+{
+    ComPtr<ID3D11VideoDevice> VDev;
+    ComPtr<ID3D11VideoContext> VCtx;
+    ComPtr<ID3D11VideoProcessorEnumerator> Enum;
+    ComPtr<ID3D11VideoProcessor> Proc;
+    ComPtr<ID3D11Texture2D> Nv12;
+    ComPtr<ID3D11VideoProcessorOutputView> OutView;
+    ComPtr<ID3D11VideoProcessorInputView> InView;
+    ID3D11Texture2D* InTex = nullptr;
+
+    HRESULT Init(ID3D11Device* Dev, ID3D11DeviceContext* Ctx, UINT W, UINT H)
+    {
+        HRESULT hr = Dev->QueryInterface(IID_PPV_ARGS(&VDev));
+        if (SUCCEEDED(hr)) hr = Ctx->QueryInterface(IID_PPV_ARGS(&VCtx));
+        if (FAILED(hr))
+            return hr;
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC Cd = {D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, {kRefresh, 1}, W, H,
+                                                 {kRefresh, 1}, W, H, D3D11_VIDEO_USAGE_OPTIMAL_SPEED};
+        hr = VDev->CreateVideoProcessorEnumerator(&Cd, &Enum);
+        if (SUCCEEDED(hr)) hr = VDev->CreateVideoProcessor(Enum.Get(), 0, &Proc);
+        if (FAILED(hr))
+            return hr;
+        D3D11_TEXTURE2D_DESC Td = {W, H, 1, 1, DXGI_FORMAT_NV12, {1, 0}, D3D11_USAGE_DEFAULT,
+                                   D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0};
+        hr = Dev->CreateTexture2D(&Td, nullptr, &Nv12);
+        if (FAILED(hr))
+            return hr;
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC Od = {D3D11_VPOV_DIMENSION_TEXTURE2D};
+        hr = VDev->CreateVideoProcessorOutputView(Nv12.Get(), Enum.Get(), &Od, &OutView);
+        if (FAILED(hr))
+            return hr;
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE In = {}, Out = {};
+        In.RGB_Range = 0;                 // full-range RGB desktop
+        Out.YCbCr_Matrix = 1;             // BT.709
+        Out.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+        VCtx->VideoProcessorSetStreamColorSpace(Proc.Get(), 0, &In);
+        VCtx->VideoProcessorSetOutputColorSpace(Proc.Get(), &Out);
+        VCtx->VideoProcessorSetStreamFrameFormat(Proc.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+        VCtx->VideoProcessorSetStreamAutoProcessingMode(Proc.Get(), 0, FALSE);
+        return S_OK;
+    }
+
+    HRESULT Convert(ID3D11Texture2D* Bgra)
+    {
+        if (Bgra != InTex)
+        {
+            InView.Reset();
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC Id = {0, D3D11_VPIV_DIMENSION_TEXTURE2D};
+            HRESULT hr = VDev->CreateVideoProcessorInputView(Bgra, Enum.Get(), &Id, &InView);
+            if (FAILED(hr))
+                return hr;
+            InTex = Bgra;
+        }
+        D3D11_VIDEO_PROCESSOR_STREAM S = {};
+        S.Enable = TRUE;
+        S.pInputSurface = InView.Get();
+        return VCtx->VideoProcessorBlt(Proc.Get(), OutView.Get(), 0, 1, &S);
+    }
+};
+
+static void SetCodecValue(ICodecAPI* Api, const GUID& Key, VARTYPE Vt, ULONG Value, const char* What)
+{
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = Vt;
+    if (Vt == VT_BOOL)
+        v.boolVal = Value ? VARIANT_TRUE : VARIANT_FALSE;
+    else
+        v.ulVal = Value;
+    HRESULT hr = Api->SetValue(&Key, &v);
+    if (FAILED(hr))
+        DrongLog("  encoder ignores %s (0x%08x)", What, hr);
+}
+
+static int NalType(const BYTE* p) { return p[0] & 0x1F; }
+
+// Calls Fn(type, offset) for every NAL unit start in an Annex-B buffer.
+template <typename F> static void ForEachNal(const std::vector<BYTE>& B, F Fn)
+{
+    for (size_t i = 0; i + 3 < B.size(); i++)
+    {
+        if (B[i] == 0 && B[i + 1] == 0 && B[i + 2] == 1)
+        {
+            Fn(NalType(&B[i + 3]), i);
+            i += 2;
+        }
+    }
+}
+
+struct MfEncoder : FrameEncoder
+{
+    bool Hardware = false, Async = false, D3DAware = false;
+    std::string FriendlyName;
+    ComPtr<IMFTransform> Mft;
+    ComPtr<IMFMediaEventGenerator> Events;
+    ComPtr<ICodecAPI> Codec;
+    ComPtr<IMFDXGIDeviceManager> DevManager;
+    ComPtr<ID3D11Device> Device;
+    ComPtr<ID3D11DeviceContext> DeviceContext;
+    ComPtr<ID3D11Texture2D> Staging; // NV12 readback for encoders that can't take GPU textures
+    Nv12Converter Converter;
+    DWORD InId = 0, OutId = 0;
+    UINT NeedInput = 0;
+    LONGLONG Time = 0;
+    std::vector<BYTE> SequenceHeader; // SPS/PPS, prepended to IDR frames that come without them
+
+    const char* Name() const override { return FriendlyName.c_str(); }
+
+    ~MfEncoder() override
+    {
+        if (Mft)
+        {
+            Mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            Mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        }
+        if (Events) Events.Reset();
+        if (Mft) Mft.Reset();
+    }
+
+    HRESULT Init(ID3D11Device* Dev, ID3D11DeviceContext* Ctx, LUID Adapter, UINT W, UINT H, bool UseHardware)
+    {
+        static HRESULT Startup = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+        if (FAILED(Startup))
+            return Startup;
+        Device = Dev, DeviceContext = Ctx, Hardware = UseHardware;
+
+        // find an H.264 encoder: the hardware one of the GPU rendering this monitor, or the software one
+        MFT_REGISTER_TYPE_INFO InType = {MFMediaType_Video, MFVideoFormat_NV12};
+        MFT_REGISTER_TYPE_INFO OutType = {MFMediaType_Video, MFVideoFormat_H264};
+        ComPtr<IMFAttributes> EnumAttr;
+        MFCreateAttributes(&EnumAttr, 1);
+        EnumAttr->SetBlob(MFT_ENUM_ADAPTER_LUID, (const UINT8*)&Adapter, sizeof Adapter);
+        IMFActivate** Acts = nullptr;
+        UINT32 Count = 0;
+        UINT32 Flags = (UseHardware ? MFT_ENUM_FLAG_HARDWARE : MFT_ENUM_FLAG_SYNCMFT) | MFT_ENUM_FLAG_SORTANDFILTER;
+        HRESULT hr = MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, Flags, &InType, &OutType, UseHardware ? EnumAttr.Get() : nullptr, &Acts, &Count);
+        if (FAILED(hr) || Count == 0)
+        {
+            CoTaskMemFree(Acts);
+            return FAILED(hr) ? hr : MF_E_TOPO_CODEC_NOT_FOUND;
+        }
+        for (UINT32 i = 0; i < Count && !Mft; i++)
+        {
+            if (SUCCEEDED(Acts[i]->ActivateObject(IID_PPV_ARGS(&Mft))))
+            {
+                WCHAR* N = nullptr;
+                UINT32 Len = 0;
+                if (SUCCEEDED(Acts[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &N, &Len)))
+                {
+                    char Buf[256];
+                    WideCharToMultiByte(CP_UTF8, 0, N, -1, Buf, sizeof Buf, nullptr, nullptr);
+                    FriendlyName = std::string("Media Foundation: ") + Buf;
+                    CoTaskMemFree(N);
+                }
+            }
+        }
+        for (UINT32 i = 0; i < Count; i++)
+            Acts[i]->Release();
+        CoTaskMemFree(Acts);
+        if (!Mft)
+            return MF_E_TOPO_CODEC_NOT_FOUND;
+        if (FriendlyName.empty())
+            FriendlyName = UseHardware ? "Media Foundation hardware encoder" : "Media Foundation software encoder";
+
+        ComPtr<IMFAttributes> Attr;
+        if (SUCCEEDED(Mft->GetAttributes(&Attr)))
+        {
+            Async = MFGetAttributeUINT32(Attr.Get(), MF_TRANSFORM_ASYNC, FALSE) != 0;
+            if (Async)
+                Attr->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+            D3DAware = MFGetAttributeUINT32(Attr.Get(), MF_SA_D3D11_AWARE, FALSE) != 0;
+            Attr->SetUINT32(MF_LOW_LATENCY, TRUE);
+        }
+        if (Async && FAILED(Mft.As(&Events)))
+            return E_NOINTERFACE;
+        if (D3DAware)
+        {
+            UINT Token = 0;
+            hr = MFCreateDXGIDeviceManager(&Token, &DevManager);
+            if (SUCCEEDED(hr)) hr = DevManager->ResetDevice(Dev, Token);
+            if (SUCCEEDED(hr)) hr = Mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)DevManager.Get());
+            if (FAILED(hr))
+            {
+                DrongLog("  encoder rejected the D3D11 device (0x%08x); using system memory", hr);
+                DevManager.Reset();
+                D3DAware = false;
+            }
+        }
+        if (FAILED(Mft->GetStreamIDs(1, &InId, 1, &OutId)))
+            InId = OutId = 0;
+
+        // low-latency settings, the same stream the dongle gets from AMF
+        if (SUCCEEDED(Mft.As(&Codec)))
+        {
+            SetCodecValue(Codec.Get(), CODECAPI_AVLowLatencyMode, VT_BOOL, TRUE, "low-latency mode");
+            // low-delay VBR rather than CBR: CBR pads frames with filler data, which freezes the dongle
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncCommonRateControlMode, VT_UI4, eAVEncCommonRateControlMode_LowDelayVBR, "low-delay VBR");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncCommonMeanBitRate, VT_UI4, (ULONG)kBitrate, "bitrate");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncMPVGOPSize, VT_UI4, kRefresh * 2, "GOP size");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, VT_UI4, 0, "no B-frames");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncVideoMaxNumRefFrame, VT_UI4, 1, "1 reference frame");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncH264CABACEnable, VT_BOOL, FALSE, "CAVLC");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncCommonQualityVsSpeed, VT_UI4, 0, "speed preset");
+        }
+
+        // output type first (encoders derive the input type from it), constrained baseline with fallbacks
+        static const UINT32 Profiles[] = {eAVEncH264VProfile_ConstrainedBase, eAVEncH264VProfile_Base, eAVEncH264VProfile_Main};
+        hr = E_FAIL;
+        for (UINT32 Profile : Profiles)
+        {
+            ComPtr<IMFMediaType> Out;
+            MFCreateMediaType(&Out);
+            Out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            Out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+            Out->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)kBitrate);
+            MFSetAttributeSize(Out.Get(), MF_MT_FRAME_SIZE, W, H);
+            MFSetAttributeRatio(Out.Get(), MF_MT_FRAME_RATE, kRefresh, 1);
+            MFSetAttributeRatio(Out.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+            Out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+            Out->SetUINT32(MF_MT_MPEG2_PROFILE, Profile);
+            hr = Mft->SetOutputType(OutId, Out.Get(), 0);
+            if (SUCCEEDED(hr))
+            {
+                DrongLog("  H.264 profile %u", Profile);
+                break;
+            }
+        }
+        if (FAILED(hr))
+        {
+            DrongLog("  encoder rejected the output type (0x%08x)", hr);
+            return hr;
+        }
+        ComPtr<IMFMediaType> In;
+        MFCreateMediaType(&In);
+        In->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        In->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+        MFSetAttributeSize(In.Get(), MF_MT_FRAME_SIZE, W, H);
+        MFSetAttributeRatio(In.Get(), MF_MT_FRAME_RATE, kRefresh, 1);
+        MFSetAttributeRatio(In.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        In->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        In->SetUINT32(MF_MT_DEFAULT_STRIDE, W);
+        hr = Mft->SetInputType(InId, In.Get(), 0);
+        if (FAILED(hr))
+        {
+            DrongLog("  encoder rejected NV12 input (0x%08x)", hr);
+            return hr;
+        }
+
+        hr = Converter.Init(Dev, Ctx, W, H);
+        if (FAILED(hr))
+        {
+            DrongLog("  D3D11 video processor unavailable (0x%08x)", hr);
+            return hr;
+        }
+        if (!D3DAware)
+        {
+            D3D11_TEXTURE2D_DESC Sd = {W, H, 1, 1, DXGI_FORMAT_NV12, {1, 0}, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0};
+            hr = Dev->CreateTexture2D(&Sd, nullptr, &Staging);
+            if (FAILED(hr))
+                return hr;
+        }
+
+        Mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        Mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        Width = W, Height = H;
+        return S_OK;
+    }
+
+    // Handles the asynchronous MFT's events until Pred() holds or the timeout passes.
+    template <typename P> HRESULT PumpEvents(P Pred, DWORD TimeoutMs)
+    {
+        double T0 = NowMs();
+        while (!Pred())
+        {
+            ComPtr<IMFMediaEvent> Ev;
+            HRESULT hr = Events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &Ev);
+            if (hr == MF_E_NO_EVENTS_AVAILABLE)
+            {
+                if (NowMs() - T0 > TimeoutMs)
+                    return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+                Sleep(1);
+                continue;
+            }
+            if (FAILED(hr))
+                return hr;
+            MediaEventType Type = MEUnknown;
+            Ev->GetType(&Type);
+            if (Type == METransformNeedInput)
+                NeedInput++;
+            else if (Type == METransformHaveOutput)
+            {
+                hr = Collect();
+                if (FAILED(hr))
+                    return hr;
+            }
+        }
+        return S_OK;
+    }
+
+    HRESULT MakeInputSample(ComPtr<IMFSample>& Sample)
+    {
+        HRESULT hr = MFCreateSample(&Sample);
+        if (FAILED(hr))
+            return hr;
+        ComPtr<IMFMediaBuffer> Buf;
+        if (D3DAware)
+        {
+            hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), Converter.Nv12.Get(), 0, FALSE, &Buf);
+        }
+        else
+        {
+            // software encoder: read NV12 back from the GPU
+            DeviceContext->CopyResource(Staging.Get(), Converter.Nv12.Get());
+            D3D11_MAPPED_SUBRESOURCE M;
+            hr = DeviceContext->Map(Staging.Get(), 0, D3D11_MAP_READ, 0, &M);
+            if (FAILED(hr))
+                return hr;
+            DWORD Size = Width * Height * 3 / 2;
+            hr = MFCreateMemoryBuffer(Size, &Buf);
+            BYTE* Dst = nullptr;
+            if (SUCCEEDED(hr) && SUCCEEDED(hr = Buf->Lock(&Dst, nullptr, nullptr)))
+            {
+                const BYTE* Src = (const BYTE*)M.pData;
+                for (UINT y = 0; y < Height * 3 / 2; y++) // Y rows, then interleaved UV rows
+                    memcpy(Dst + (size_t)y * Width, Src + (size_t)y * M.RowPitch, Width);
+                Buf->Unlock();
+                Buf->SetCurrentLength(Size);
+            }
+            DeviceContext->Unmap(Staging.Get(), 0);
+        }
+        if (SUCCEEDED(hr)) hr = Sample->AddBuffer(Buf.Get());
+        if (SUCCEEDED(hr)) hr = Sample->SetSampleTime(Time);
+        if (SUCCEEDED(hr)) hr = Sample->SetSampleDuration(10'000'000 / kRefresh);
+        Time += 10'000'000 / kRefresh;
+        return hr;
+    }
+
+    // Pulls one output sample into Au.
+    HRESULT Collect()
+    {
+        MFT_OUTPUT_STREAM_INFO Info = {};
+        Mft->GetOutputStreamInfo(OutId, &Info);
+        MFT_OUTPUT_DATA_BUFFER Odb = {OutId};
+        ComPtr<IMFSample> Own;
+        if (!(Info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)))
+        {
+            ComPtr<IMFMediaBuffer> Buf;
+            MFCreateMemoryBuffer(max<DWORD>(Info.cbSize, Width * Height * 2), &Buf);
+            MFCreateSample(&Own);
+            Own->AddBuffer(Buf.Get());
+            Odb.pSample = Own.Get();
+        }
+        DWORD Status = 0;
+        HRESULT hr = Mft->ProcessOutput(0, 1, &Odb, &Status);
+        if (Odb.pEvents)
+            Odb.pEvents->Release();
+        if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
+        {
+            // the encoder settled its output type: re-apply it and keep going
+            ComPtr<IMFMediaType> T;
+            if (SUCCEEDED(Mft->GetOutputAvailableType(OutId, 0, &T)))
+                Mft->SetOutputType(OutId, T.Get(), 0);
+            return S_OK;
+        }
+        if (FAILED(hr))
+            return hr;
+        ComPtr<IMFSample> Out;
+        Out.Attach(Odb.pSample);
+        if (Own)
+            Out->AddRef(); // we still hold our own reference via Own
+        ComPtr<IMFMediaBuffer> Buf;
+        hr = Out->ConvertToContiguousBuffer(&Buf);
+        BYTE* P = nullptr;
+        DWORD Len = 0;
+        if (SUCCEEDED(hr) && SUCCEEDED(hr = Buf->Lock(&P, nullptr, &Len)))
+        {
+            Au.insert(Au.end(), P, P + Len);
+            Buf->Unlock();
+        }
+        return hr;
+    }
+
+    // Makes sure every IDR frame carries SPS/PPS (some encoders only put them in the media type).
+    // Removes filler-data NAL units (type 12). Some encoders pad CBR streams with them; the dongle freezes on them.
+    void StripFiller()
+    {
+        std::vector<size_t> Starts; // offsets of the start codes (including a leading zero of 4-byte codes)
+        std::vector<int> Types;
+        ForEachNal(Au, [&](int T, size_t Off) {
+            Starts.push_back(Off > 0 && Au[Off - 1] == 0 ? Off - 1 : Off);
+            Types.push_back(T);
+        });
+        if (std::find(Types.begin(), Types.end(), 12) == Types.end())
+            return;
+        std::vector<BYTE> Kept;
+        Kept.reserve(Au.size());
+        for (size_t i = 0; i < Starts.size(); i++)
+        {
+            size_t End = i + 1 < Starts.size() ? Starts[i + 1] : Au.size();
+            if (Types[i] != 12)
+                Kept.insert(Kept.end(), Au.begin() + Starts[i], Au.begin() + End);
+        }
+        Au.swap(Kept);
+    }
+
+    void EnsureHeaders()
+    {
+        bool HasSps = false, HasIdr = false;
+        ForEachNal(Au, [&](int T, size_t) { HasSps |= T == 7; HasIdr |= T == 5; });
+        if (HasSps)
+        {
+            // remember the newest SPS/PPS in case later IDRs come without them
+            size_t Start = SIZE_MAX, End = Au.size();
+            ForEachNal(Au, [&](int T, size_t Off) {
+                if ((T == 7 || T == 8) && Start == SIZE_MAX) Start = Off;
+                else if (T != 7 && T != 8 && Start != SIZE_MAX && End == Au.size()) End = Off;
+            });
+            if (Start != SIZE_MAX)
+            {
+                size_t S = Start > 0 && Au[Start - 1] == 0 ? Start - 1 : Start;
+                size_t E = End < Au.size() && End > 0 && Au[End - 1] == 0 ? End - 1 : End;
+                SequenceHeader.assign(Au.begin() + S, Au.begin() + E);
+            }
+            return;
+        }
+        if (!HasIdr)
+            return;
+        if (SequenceHeader.empty())
+        {
+            ComPtr<IMFMediaType> T;
+            UINT32 Size = 0;
+            if (SUCCEEDED(Mft->GetOutputCurrentType(OutId, &T)) && SUCCEEDED(T->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &Size)) && Size)
+            {
+                SequenceHeader.resize(Size);
+                T->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, SequenceHeader.data(), Size, nullptr);
+            }
+        }
+        Au.insert(Au.begin(), SequenceHeader.begin(), SequenceHeader.end());
+    }
+
+    HRESULT Encode(ID3D11Texture2D* Bgra, bool ForceIdr) override
+    {
+        HRESULT hr = Converter.Convert(Bgra);
+        if (FAILED(hr))
+            return hr;
+        if (ForceIdr && Codec)
+        {
+            VARIANT v;
+            VariantInit(&v);
+            v.vt = VT_UI4;
+            v.ulVal = 1;
+            Codec->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &v);
+        }
+        ComPtr<IMFSample> Sample;
+        hr = MakeInputSample(Sample);
+        if (FAILED(hr))
+            return hr;
+        Au.clear();
+        if (Async)
+        {
+            hr = PumpEvents([&] { return NeedInput > 0; }, 200);
+            if (FAILED(hr))
+                return hr;
+            hr = Mft->ProcessInput(InId, Sample.Get(), 0);
+            if (FAILED(hr))
+                return hr;
+            NeedInput--;
+            // low-latency mode: the frame comes out before the encoder asks for the next one
+            hr = PumpEvents([&] { return !Au.empty(); }, 200);
+        }
+        else
+        {
+            hr = Mft->ProcessInput(InId, Sample.Get(), 0);
+            if (FAILED(hr))
+                return hr;
+            hr = Collect();
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT)
+                hr = S_OK; // software encoder warming up: nothing to send for this frame
+        }
+        if (FAILED(hr))
+            return hr;
+        StripFiller();
+        EnsureHeaders();
+        return S_OK;
+    }
+};
+
+// ---- selection ---------------------------------------------------------------------------------------------------
+
+// HKLM\SOFTWARE\open-drong-display  Encoder = auto | amf | mf | mf-software  (default auto)
+static std::string EncoderSetting()
+{
+    char Buf[32] = {};
+    DWORD Size = sizeof Buf;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\open-drong-display", "Encoder", RRF_RT_REG_SZ, nullptr, Buf, &Size) != ERROR_SUCCESS)
+        return "auto";
+    std::string S = Buf;
+    for (auto& c : S)
+        c = (char)tolower((unsigned char)c);
+    return S;
+}
+
+// auto: AMF on AMD GPUs (the tested path), otherwise the GPU's Media Foundation encoder, otherwise software.
+static std::unique_ptr<FrameEncoder> CreateEncoder(Direct3DDevice& D, UINT W, UINT H)
+{
+    DXGI_ADAPTER_DESC1 Ad = {};
+    D.Adapter->GetDesc1(&Ad);
+    std::string Want = EncoderSetting();
+    std::vector<std::string> Order;
+    if (Want == "amf" || Want == "mf" || Want == "mf-software")
+        Order.push_back(Want);
+    if (Ad.VendorId == 0x1002)
+        Order.push_back("amf");
+    Order.push_back("mf");
+    Order.push_back("mf-software");
+    DrongLog("render GPU vendor 0x%04x, encoder setting '%s'", Ad.VendorId, Want.c_str());
+
+    for (const auto& Kind : Order)
+    {
+        std::unique_ptr<FrameEncoder> E;
+        HRESULT hr;
+        if (Kind == "amf")
+        {
+            auto A = std::make_unique<AmfEncoder>();
+            hr = A->Init(D.Device.Get(), W, H);
+            E = std::move(A);
+        }
+        else
+        {
+            auto M = std::make_unique<MfEncoder>();
+            hr = M->Init(D.Device.Get(), D.DeviceContext.Get(), D.AdapterLuid, W, H, Kind == "mf");
+            E = std::move(M);
+        }
+        if (SUCCEEDED(hr))
+        {
+            DrongLog("encoder: %s, %ux%u", E->Name(), W, H);
+            return E;
+        }
+        DrongLog("encoder %s not available (0x%08x)", Kind.c_str(), hr);
+    }
+    return nullptr;
+}
 
 #pragma endregion
 
@@ -782,6 +1364,7 @@ NTSTATUS DrongIddDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE Previous
 
     auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
     pContext->pContext->InitAdapter();
+    pContext->pContext->Usb.Resume();
     pContext->pContext->Session.Start(&pContext->pContext->Usb);
 
     return STATUS_SUCCESS;
@@ -793,6 +1376,7 @@ NTSTATUS DrongIddDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetSta
     UNREFERENCED_PARAMETER(TargetState);
 
     auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+    pContext->pContext->Usb.Close(); // let the frame in flight finish, send nothing after it
     pContext->pContext->Session.Stop();
     DrongLog("device leaving D0");
 
@@ -887,7 +1471,15 @@ void SwapChainProcessor::Run()
     DWORD AvTask = 0;
     HANDLE AvTaskHandle = AvSetMmThreadCharacteristicsW(L"Distribution", &AvTask);
 
+    // Media Foundation encoders are COM objects
+    HRESULT ComInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
     RunCore();
+
+    if (SUCCEEDED(ComInit))
+    {
+        CoUninitialize();
+    }
 
     // Always delete the swap-chain object when swap-chain processing loop terminates in order to kick the system to
     // provide a new swap-chain if necessary.
@@ -925,7 +1517,7 @@ void SwapChainProcessor::RunCore()
     constexpr double MinIntervalMs = 15;
 
     ComPtr<ID3D11Texture2D> Last; // our copy of the newest frame (Windows owns the swap-chain surfaces)
-    Encoder Enc;
+    std::unique_ptr<FrameEncoder> Enc;
     bool NewFrame = false, WasReady = false;
     double LastSend = 0, LastIdr = 0, StatT = NowMs(), EncSum = 0, UsbSum = 0;
     ULONG64 Frames = 0, Bytes = 0;
@@ -983,7 +1575,7 @@ void SwapChainProcessor::RunCore()
             {
                 D3D11_TEXTURE2D_DESC Desc;
                 Surface->GetDesc(&Desc);
-                if (!Last || Desc.Width != Enc.Width || Desc.Height != Enc.Height)
+                if (!Last || !Enc || Desc.Width != Enc->Width || Desc.Height != Enc->Height)
                 {
                     DrongLog("swap-chain surface %ux%u format %d bind 0x%x misc 0x%x", Desc.Width, Desc.Height,
                              (int)Desc.Format, Desc.BindFlags, Desc.MiscFlags);
@@ -991,7 +1583,7 @@ void SwapChainProcessor::RunCore()
                                                 D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, 0, 0};
                     Last.Reset();
                     if (FAILED(m_Device->Device->CreateTexture2D(&Own, nullptr, &Last)) ||
-                        FAILED(Enc.Init(m_Device->Device.Get(), Desc.Width, Desc.Height)))
+                        !(Enc = CreateEncoder(*m_Device, Desc.Width, Desc.Height)))
                     {
                         Last.Reset();
                     }
@@ -1044,18 +1636,25 @@ void SwapChainProcessor::RunCore()
             LastIdr = T0;
         WasReady = true;
         LastSend = T0;
-        if (FAILED(Enc.Encode(Last.Get(), ForceIdr)))
+        if (FAILED(Enc->Encode(Last.Get(), ForceIdr)))
         {
-            DrongLog("encode failed; re-initialising encoder");
-            Enc.Init(m_Device->Device.Get(), Enc.Width, Enc.Height);
+            DrongLog("encode failed (%s); re-initialising encoder", Enc->Name());
+            UINT W = Enc->Width, H = Enc->Height;
+            Enc.reset();
+            Enc = CreateEncoder(*m_Device, W, H);
+            WasReady = false; // start the new encoder with an IDR
+            if (!Enc)
+            {
+                Last.Reset();
+            }
             continue;
         }
         double T1 = NowMs();
-        if (!Enc.Au.empty() && !m_Usb->SendFrame(Enc.Au.data(), Enc.Au.size(), Enc.Width, Enc.Height))
+        if (!Enc->Au.empty() && !m_Usb->SendFrame(Enc->Au.data(), Enc->Au.size(), Enc->Width, Enc->Height))
         {
             DrongLog("usb frame write failed");
         }
-        if (DumpFrames < 150 && !Enc.Au.empty())
+        if (DumpFrames < 150 && !Enc->Au.empty())
         {
             // diagnostics: the first ~3 s of every stream, decodable with ffmpeg
             HANDLE f = CreateFileW(L"C:\\ProgramData\\drong-display\\stream-start.h264", DumpFrames ? FILE_APPEND_DATA : GENERIC_WRITE,
@@ -1063,13 +1662,13 @@ void SwapChainProcessor::RunCore()
             if (f != INVALID_HANDLE_VALUE)
             {
                 DWORD w;
-                WriteFile(f, Enc.Au.data(), (DWORD)Enc.Au.size(), &w, nullptr);
+                WriteFile(f, Enc->Au.data(), (DWORD)Enc->Au.size(), &w, nullptr);
                 CloseHandle(f);
             }
             DumpFrames++;
         }
         double T2 = NowMs();
-        Frames++, Bytes += Enc.Au.size(), EncSum += T1 - T0, UsbSum += T2 - T1;
+        Frames++, Bytes += Enc->Au.size(), EncSum += T1 - T0, UsbSum += T2 - T1;
         NewFrame = false;
         if (T2 - StatT >= 30000)
         {

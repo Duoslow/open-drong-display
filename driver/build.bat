@@ -22,4 +22,4 @@ cl /nologo /std:c++17 /EHsc /O2 /W3 /MD /LD /Zi ^
    /Fo:out\ /Fd:out\ DrongIdd.cpp /Fe:out\DrongIdd.dll ^
    /link /DEBUG /OPT:REF /OPT:ICF ^
    "%KIT%\Lib\wdf\umdf\x64\2.25\WdfDriverStubUm.lib" "%KIT%\Lib\%SDKVER%\um\x64\iddcx\1.4\iddcxstub.lib" ^
-   d3d11.lib dxgi.lib avrt.lib ole32.lib ntdll.lib || exit /b 1
+   d3d11.lib dxgi.lib avrt.lib ole32.lib oleaut32.lib ntdll.lib mfplat.lib mfuuid.lib advapi32.lib || exit /b 1

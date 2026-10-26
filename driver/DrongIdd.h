@@ -57,6 +57,8 @@ namespace Microsoft
             int ReadEvent(ULONG Ev[6], ULONG TimeoutMs);
             std::vector<BYTE> ReadData(size_t n);
             bool ControlMsg9();
+            void Close();
+            void Resume();
 
         private:
             long Xfer(WDFUSBPIPE Pipe, BYTE* Buf, ULONG Len, ULONG TimeoutMs);
@@ -65,6 +67,7 @@ namespace Microsoft
             WDFUSBDEVICE m_UsbDevice = nullptr;
             WDFUSBPIPE m_In = nullptr, m_Out = nullptr;
             std::mutex m_WriteLock;
+            bool m_Closed = false;
             std::vector<BYTE> m_Scratch;
         };
 

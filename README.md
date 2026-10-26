@@ -18,20 +18,23 @@ Windows desktop compositor
    │  frames for "USB-Monitor"            (IddCx swap-chain, on the GPU)
    ▼
 DrongIdd.dll  (UMDF 2 / IddCx display driver, bound to the dongle's USB interface 0)
-   │  GPU copy → AMD AMF: BGRA→NV12 → H.264 (constrained baseline, ultra-low-latency, 1 ref frame)
+   │  GPU copy → H.264 (constrained baseline, low latency, 1 ref frame) with
+   │    AMD GPUs:     AMD AMF
+   │    other GPUs:   D3D11 video processor (BGRA→NV12) → the GPU's Media Foundation encoder
+   │    no hardware:  Microsoft's software H.264 encoder
    ▼
 USB bulk OUT 0x01  — reverse-engineered protocol, ≤ 50 frames/s
    ▼
 dongle (embedded Linux) decodes H.264 → HDMI
 ```
 
-Measured on a Radeon RX 9060 XT: ~2.7 ms encode + ~1–2 ms USB per frame.
+Measured on a Radeon RX 9060 XT with AMF: ~2.7 ms encode + ~1–2 ms USB per frame.
 
 ## Requirements
 
 - Windows 10 2004 or newer / Windows 11, x64
-- **An AMD Radeon GPU with a hardware video encoder** (the driver encodes with AMD AMF; NVIDIA/Intel are not
-  supported yet)
+- A GPU with a hardware H.264 encoder — AMD (tested), NVIDIA or Intel (should work, untested — please report).
+  Without one, the driver falls back to software encoding on the CPU. See [Video encoders](#video-encoders).
 - The dongle: USB ID `1CBE:0003`, shows up as *windows mirroring interface*, *Drong USB Audio Device* and a small
   USB drive with `Drong Display.exe` on it
 - To build: Visual Studio 2022 or newer with the C++ desktop workload, git, and the
@@ -84,6 +87,26 @@ Get-PnpDevice -PresentOnly | ? InstanceId -match 'VID_1CBE&PID_0003&MI_0[13]' | 
 
 (Disabled devices are remembered per USB port.)
 
+## Video encoders
+
+The driver encodes on the GPU that renders USB-Monitor and picks, in order:
+
+| | Used on | Status |
+|---|---|---|
+| **AMD AMF** | AMD Radeon | tested (RX 9060 XT) |
+| **Media Foundation, hardware** — the GPU vendor's H.264 encoder (NVENC, Quick Sync, VCN) through Windows' standard encoder interface | NVIDIA, Intel, or AMD if AMF fails | tested on AMD; NVIDIA/Intel untested |
+| **Media Foundation, software** — Microsoft's H.264 encoder, on the CPU | any PC | tested; uses noticeable CPU |
+
+The log shows the choice (`encoder: …`). To force one, set a string value and replug the dongle (or restart the
+device in Device Manager):
+
+```
+reg add "HKLM\SOFTWARE\open-drong-display" /v Encoder /t REG_SZ /d mf          (amf | mf | mf-software | auto)
+reg delete "HKLM\SOFTWARE\open-drong-display" /v Encoder                        (back to automatic)
+```
+
+If the forced encoder isn't available the driver falls back to the next one.
+
 ## Signing
 
 `install.ps1` creates a code-signing certificate (`CN=drong-display local driver signing`), signs the driver and
@@ -106,6 +129,7 @@ with `ffplay` to see exactly what was sent.
 | Delay grows over time | The dongle drains frames at only ~50/s; the driver's 50 Hz mode keeps below that. Don't raise the refresh rate. |
 | USB-Monitor missing | Device Manager → *Display adapters* → *Drong USB Display (USB-Monitor)* should be present without a warning sign. Re-run `install.ps1`. |
 | `install.ps1`: *UpdateDriverForPlugAndPlayDevices failed* | The dongle wasn't plugged in. |
+| Picture freezes with a non-AMD encoder | Please open an issue with `driver.log` and `stream-start.h264` attached. As a workaround, force `mf-software` (see [Video encoders](#video-encoders)). |
 
 ## Alternative usage
 

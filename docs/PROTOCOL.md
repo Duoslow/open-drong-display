@@ -93,3 +93,9 @@ bytes 24..63  totalLen, chunkLen, nChunks, chunkIndex (1-based), 1, width, heigh
   least every 2 s so a lost frame cannot leave the screen broken for long.
 - A stream that the device could not decode (e.g. sent before it was ready) shows as black with glitched lines and
   can leave it unresponsive until replugged.
+- **No filler data.** Filler NAL units (type 12, which CBR encoders such as Media Foundation's add as padding)
+  freeze the picture and can crash the device. Use VBR/low-delay rate control or strip them before sending.
+- **Never cut a frame off.** If a transfer is cancelled in the middle of a frame (e.g. the sender stops while a frame
+  is being written), the device's firmware may crash and drop off USB until it is power-cycled. Finish the frame in
+  flight before stopping.
+- Multiple slices per frame and SEI NAL units are fine; access unit delimiters (type 9) are fine.
