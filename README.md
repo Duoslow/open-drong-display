@@ -1,8 +1,9 @@
 # open-drong-display
 
 An open-source Windows display driver for the **"Drong Display" USB screen dongle** (USB `1CBE:0003`) — a
-replacement for the vendor software, which phones home to a server in China, installs a self-signed root
-certificate and downloads adverts (see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md)).
+replacement for the vendor software, which sends device and PC information to the vendor's server
+(`ds.dronghootin.com.cn`), installs a self-signed root certificate and downloads adverts
+(see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md)).
 
 Plug the dongle in and Windows gets an extra monitor, **USB-Monitor (1920×1080 @ 50 Hz)**, that behaves like any
 other screen: extend the desktop onto it, drag windows to it, put SimHub dashboards on it. Unplug it and the monitor
