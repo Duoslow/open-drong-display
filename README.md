@@ -6,8 +6,7 @@ replacement for the vendor software, which sends device and PC information to th
 (see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md)).
 
 Plug the dongle in and Windows gets an extra monitor, **USB-Monitor (1920×1080 @ 50 Hz)**, that behaves like any
-other screen: extend the desktop onto it, drag windows to it, put SimHub dashboards on it. Unplug it and the monitor
-goes away. No background program, no network access, no vendor code.
+other screen. Unplug it and the monitor goes away. No background program, no network access, no vendor code.
 
 > Not affiliated with or endorsed by the maker of the dongle. The USB protocol was reverse-engineered for
 > interoperability; see [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -105,6 +104,12 @@ with `ffplay` to see exactly what was sent.
 | USB-Monitor missing | Device Manager → *Display adapters* → *Drong USB Display (USB-Monitor)* should be present without a warning sign. Re-run `install.ps1`. |
 | `install.ps1`: *UpdateDriverForPlugAndPlayDevices failed* | The dongle wasn't plugged in. |
 
+## Alternative usage
+
+Can't or don't want to install a driver? [`alternative/`](alternative/README.md) has a user-mode sender program
+(with an optional virtual monitor) that drives the dongle through Microsoft's generic WinUSB driver, and the Python
+prototype used to work out the protocol.
+
 ## Project layout
 
 | Path | |
@@ -112,8 +117,8 @@ with `ffplay` to see exactly what was sent.
 | `driver/` | **DrongIdd**, the display driver (IddCx), its INF, `build.bat` and `install.ps1` |
 | `docs/PROTOCOL.md` | The dongle's USB protocol and what we learned on real hardware |
 | `docs/VENDOR-SOFTWARE.md` | What the vendor installer and driver do |
-| `tools/` | Earlier user-mode approach: a sender program + a virtual monitor, and the Python prototype used to work out the protocol — see [tools/README.md](tools/README.md) |
-| `third_party/` | AMD AMF SDK headers, fetched by `tools/fetch-amf.cmd` on first build (not committed) |
+| `alternative/` | Using the dongle without the driver: user-mode sender, virtual display setup, Python prototype |
+| `scripts/fetch-amf.cmd` | Fetches the AMD AMF SDK headers into `third_party/` on first build (not committed) |
 
 ## License
 

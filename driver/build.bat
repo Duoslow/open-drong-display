@@ -2,7 +2,7 @@
 rem Builds DrongIdd.dll (UMDF 2.25 / IddCx 1.4 display driver) with MSVC + the Windows Driver Kit 10.0.26100.
 setlocal
 cd /d "%~dp0"
-call ..\tools\fetch-amf.cmd || exit /b 1
+call ..\scripts\fetch-amf.cmd || exit /b 1
 set "AMF=..\third_party\amf-sdk\amf\public\include"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"

@@ -2,7 +2,7 @@
 rem Builds drongcast.exe (user-mode sender) with MSVC x64.
 setlocal
 cd /d "%~dp0"
-call ..\fetch-amf.cmd || exit /b 1
+call ..\..\scripts\fetch-amf.cmd || exit /b 1
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1

@@ -4,7 +4,7 @@
 #   2. trusts that certificate (LocalMachine Root + TrustedPublisher) and then DELETES its private key,
 #      so nothing else can ever be signed with it
 #   3. installs the driver package and forces it onto the dongle's display interface (USB\VID_1CBE&PID_0003&MI_00)
-#   4. disables the Virtual Display Driver (tools\virtual-display) if present, which this driver replaces
+#   4. disables the Virtual Display Driver (alternative\virtual-display) if present, which this driver replaces
 #
 #   -Uninstall removes the driver package and the certificates again and re-enables the Virtual Display Driver.
 #
@@ -34,7 +34,7 @@ try {
         foreach ($inf in Get-OurPublishedInfs) { Write-Output "removing driver package $inf"; pnputil /delete-driver $inf /uninstall /force }
         Remove-OurCerts -Keep ''
         if ($vdd) { Enable-PnpDevice -InstanceId $vdd.InstanceId -Confirm:$false; Write-Output 'Virtual Display Driver re-enabled' }
-        Write-Output 'uninstalled. To use drongcast.exe again, re-bind WinUSB to "windows mirroring interface" in Device Manager.'
+        Write-Output 'uninstalled. For the user-mode alternative, bind WinUSB to "windows mirroring interface" (see alternative\README.md).'
         return
     }
 
@@ -51,9 +51,9 @@ try {
         Set-Content "$pkg\DrongIdd.inf" -Encoding ASCII
     Write-Output "driver version $ver"
 
-    # the user-mode sender (tools\sender) would hold the USB interface: stop it cleanly
+    # the user-mode sender (alternative\user-mode-sender) would hold the USB interface: stop it cleanly
     if (Get-Process drongcast -ErrorAction SilentlyContinue) {
-        New-Item -ItemType File -Force "$PSScriptRoot\..\tools\sender\out\stop" | Out-Null
+        New-Item -ItemType File -Force "$PSScriptRoot\..\alternative\user-mode-sender\out\stop" | Out-Null
         Start-Sleep 3
         Get-Process drongcast -ErrorAction SilentlyContinue | Stop-Process -Force
     }

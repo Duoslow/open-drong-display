@@ -1,5 +1,5 @@
 # Installs the open-source Virtual Display Driver (https://github.com/VirtualDrivers/Virtual-Display-Driver, MIT,
-# signed via SignPath) as one virtual 1920x1080 monitor named "USB-Monitor", for tools/sender/drongcast.exe.
+# signed via SignPath) as one virtual 1920x1080 monitor named "USB-Monitor", for alternative/user-mode-sender (drongcast.exe).
 # Not needed with the DrongIdd driver. Equivalent of "devcon install MttVDD.inf Root\MttVDD". Run elevated.
 #   -Apply   only copy vdd_settings.xml / user_edid.bin and restart the device
 param([string]$Log = "$PSScriptRoot\out\install-vdd.log", [switch]$Apply)

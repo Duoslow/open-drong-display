@@ -510,7 +510,7 @@ private:
                 if (si.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
                     bool andBit = buf[y * si.Pitch + x / 8] & (0x80 >> (x % 8));
                     bool xorBit = buf[(y + h) * si.Pitch + x / 8] & (0x80 >> (x % 8));
-                    // and=1,xor=0 transparent; 0/0 black; 0/1 white; 1/1 "invert" (drawn white: dashboards are dark)
+                    // and=1,xor=0 transparent; 0/0 black; 0/1 white; 1/1 "invert" (approximated as white)
                     o = andBit && !xorBit ? 0x00000000 : (xorBit ? 0xFFFFFFFF : 0xFF000000);
                 } else {
                     uint32_t c = *(const uint32_t*)&buf[y * si.Pitch + x * 4];
