@@ -39,17 +39,20 @@ Measured on a Radeon RX 9060 XT: ~2.7 ms encode + ~1–2 ms USB per frame.
 
 ## Install
 
-There are no prebuilt binaries: Windows only loads drivers signed by a certificate it trusts, so the install script
-signs the driver on your machine (see [Signing](#signing)).
+Windows only loads drivers signed by a certificate it trusts, so the install script signs the driver on your machine
+(see [Signing](#signing)); it uses the signing tools from the Windows Driver Kit either way.
 
 1. **Do not** run the vendor installer from the dongle's USB drive. If you already did, uninstall *Drong Display*
    and remove the `DrongCert` certificate (Trusted Root and Trusted Publishers).
 2. Plug in the dongle.
-3. Build (from a normal command prompt):
-   ```
-   driver\build.bat
-   ```
-4. Install (from an **administrator** PowerShell):
+3. Get the driver:
+   - **prebuilt:** download the zip from the [latest release](https://github.com/Duoslow/open-drong-display/releases/latest)
+     and unzip it, or
+   - **from source** (needs Visual Studio), from a normal command prompt:
+     ```
+     driver\build.bat
+     ```
+4. Install (from an **administrator** PowerShell, in the unzipped/cloned folder):
    ```
    powershell -ExecutionPolicy Bypass -File driver\install.ps1
    ```
@@ -58,7 +61,7 @@ signs the driver on your machine (see [Signing](#signing)).
 USB-Monitor appears a few seconds later. Arrange it in *Settings → System → Display*; Windows remembers its position
 across replugs.
 
-To update after changing the code, run both steps again — every install gets a new driver version so Windows
+To update, run steps 3 and 4 again — every install gets a new driver version so Windows
 replaces the old one.
 
 ### Uninstall
