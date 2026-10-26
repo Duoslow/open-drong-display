@@ -39,7 +39,14 @@ try {
     if (-not (Test-Path "$PSScriptRoot\out\DrongIdd.dll")) { throw 'out\DrongIdd.dll missing - run build.bat first' }
     Remove-Item $pkg -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory $pkg | Out-Null
-    Copy-Item "$PSScriptRoot\out\DrongIdd.dll", "$PSScriptRoot\DrongIdd.inf" $pkg
+    Copy-Item "$PSScriptRoot\out\DrongIdd.dll" $pkg
+    # every install gets a newer DriverVer, otherwise Windows keeps using the package already in the driver store
+    $now = Get-Date
+    $ver = '1.{0}.{1}.{2}' -f $now.ToString('yyMM'), $now.Day, $now.ToString('HHmm')
+    $date = $now.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture) # INF needs '/' whatever the locale
+    (Get-Content "$PSScriptRoot\DrongIdd.inf") -replace '^DriverVer\s*=.*$', ('DriverVer = {0},{1}' -f $date, $ver) |
+        Set-Content "$pkg\DrongIdd.inf" -Encoding ASCII
+    Write-Output "driver version $ver"
 
     # the user-mode sender would hold the USB interface: stop it cleanly
     if (Get-Process drongcast -ErrorAction SilentlyContinue) {
@@ -72,8 +79,8 @@ try {
     New-Item -ItemType Directory -Force C:\ProgramData\drong-display | Out-Null
     icacls C:\ProgramData\drong-display /grant '*S-1-5-19:(OI)(CI)M' '*S-1-5-84-0-0-0-0-0:(OI)(CI)M' | Out-Null
 
-    # 3. install, replacing older versions of our package
-    foreach ($inf in Get-OurPublishedInfs) { pnputil /delete-driver $inf /force | Out-Null }
+    # 3. install (older packages are removed once the new one is on the device)
+    $old = @(Get-OurPublishedInfs)
     pnputil /add-driver "$pkg\DrongIdd.inf"
     Add-Type -TypeDefinition @'
 using System;
@@ -89,6 +96,9 @@ public static class NewDev {
         throw "UpdateDriverForPlugAndPlayDevices failed ($err) - is the dongle plugged in?"
     }
     Write-Output ("driver installed on the dongle" + ($(if ($reboot) { ' (reboot required)' } else { '' })))
+    $inUse = (Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -contains $HwId } | Get-PnpDeviceProperty -KeyName DEVPKEY_Device_DriverInfPath).Data
+    Write-Output "dongle now uses $inUse"
+    foreach ($inf in $old) { if ($inf -ne $inUse) { Write-Output "removing superseded package $inf"; pnputil /delete-driver $inf | Out-Null } }
 
     # 4. one USB-Monitor is enough
     if ($vdd -and $vdd.Status -eq 'OK') { Disable-PnpDevice -InstanceId $vdd.InstanceId -Confirm:$false; Write-Output 'Virtual Display Driver disabled' }

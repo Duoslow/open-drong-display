@@ -51,6 +51,29 @@ The vendor uses 1920×1080 for its advert stream.
   Without it, a new session works right away — the dongle answers the handshake but does not repeat `0xA0`,
   so ask for `0x77` yourself.
 - The device repeats `0x77` (info) as a keep-alive.
+- **Send a steady stream.** At ~10 fps (only on screen changes) the dongle shows black; repeat the last frame so it
+  gets 40–50 fps even on a still screen.
+- Start streaming only after the device info (`0x77`) arrived, and send a keyframe at least every 2 s.
+
+## Driver (`driver/`, branch `driver`)
+
+`DrongIdd` is an IddCx display driver (UMDF 2.25 / IddCx 1.4, based on Microsoft's IndirectDisplay sample, MS-PL).
+It binds to the dongle's display interface, so Windows gets a **USB-Monitor (1920×1080 @ 50 Hz)** exactly while the
+dongle is plugged in — no background program, no virtual display. Each frame is copied on the GPU, encoded with AMF
+and sent with the protocol above. Log: `C:\ProgramData\drong-display\driver.log`; the first ~3 s of every stream
+are saved as `stream-start.h264` for diagnostics.
+
+Build and install (needs the Windows Driver Kit 10.0.26100):
+
+```
+driver\build.bat
+powershell -ExecutionPolicy Bypass -File driver\install.ps1      (elevated)
+powershell -ExecutionPolicy Bypass -File driver\install.ps1 -Uninstall
+```
+
+`install.ps1` signs the driver with a one-off certificate ("drong-display local driver signing"), trusts it and
+**deletes its private key** right after signing, stamps a new driver version, installs the package on the dongle
+and disables the Virtual Display Driver from `vdd/`.
 
 ## Layout
 

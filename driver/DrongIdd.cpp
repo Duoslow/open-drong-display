@@ -416,11 +416,19 @@ void DongleSession::Run()
             continue;
         }
         DrongLog("dongle handshake ok");
-        // hide the dongle's own cursor; Windows draws the pointer into our frames
-        BYTE Blank[28] = {};
-        m_Usb->Cmd(proto::CMD_CURSOR, 2, sizeof Blank, Blank, sizeof Blank);
-        m_Ready = true;
-        m_NeedIdr = true;
+        // Like the vendor driver, only stream once the dongle has reported its info (or stayed quiet for 3 s).
+        double HandshakeT = NowMs();
+        auto GoReady = [&](const char* Why)
+        {
+            if (m_Ready)
+                return;
+            // hide the dongle's own cursor; Windows draws the pointer into our frames
+            BYTE Blank[28] = {};
+            m_Usb->Cmd(proto::CMD_CURSOR, 2, sizeof Blank, Blank, sizeof Blank);
+            m_NeedIdr = true;
+            m_Ready = true;
+            DrongLog("streaming (%s)", Why);
+        };
 
         std::string LastInfo;
         while (!m_Quit)
@@ -432,6 +440,8 @@ void DongleSession::Run()
                 DrongLog("usb read error; restarting session");
                 break;
             }
+            if (!m_Ready && NowMs() - HandshakeT > 3000)
+                GoReady("no device info within 3 s");
             if (r == 0)
                 continue;
             switch (Ev[0])
@@ -446,6 +456,7 @@ void DongleSession::Run()
                 if (Info != LastInfo)
                     DrongLog("device info: %s", Info.c_str());
                 LastInfo = Info;
+                GoReady("device info received");
                 break;
             }
             case proto::EV_NONCE_REQ:
@@ -907,16 +918,18 @@ void SwapChainProcessor::RunCore()
     }
     DrongLog("swap-chain assigned");
 
-    // Re-send the last image this often when Windows has nothing new, so the dongle keeps a live stream.
-    constexpr double KeepAliveMs = 100;
+    // Re-send the last image when Windows has nothing new: the dongle shows black unless it gets a steady
+    // stream (~10 fps was not enough), so keep it at the monitor's 50 Hz.
+    constexpr double KeepAliveMs = 1000.0 / kRefresh;
     // Windows presents at most 50 Hz on this monitor; this only guards against bursts.
     constexpr double MinIntervalMs = 15;
 
     ComPtr<ID3D11Texture2D> Last; // our copy of the newest frame (Windows owns the swap-chain surfaces)
     Encoder Enc;
     bool NewFrame = false, WasReady = false;
-    double LastSend = 0, StatT = NowMs(), EncSum = 0, UsbSum = 0;
+    double LastSend = 0, LastIdr = 0, StatT = NowMs(), EncSum = 0, UsbSum = 0;
     ULONG64 Frames = 0, Bytes = 0;
+    int DumpFrames = 0;
 
     // Acquire and release buffers in a loop
     for (;;)
@@ -972,6 +985,8 @@ void SwapChainProcessor::RunCore()
                 Surface->GetDesc(&Desc);
                 if (!Last || Desc.Width != Enc.Width || Desc.Height != Enc.Height)
                 {
+                    DrongLog("swap-chain surface %ux%u format %d bind 0x%x misc 0x%x", Desc.Width, Desc.Height,
+                             (int)Desc.Format, Desc.BindFlags, Desc.MiscFlags);
                     D3D11_TEXTURE2D_DESC Own = {Desc.Width, Desc.Height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0},
                                                 D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, 0, 0};
                     Last.Reset();
@@ -1022,10 +1037,12 @@ void SwapChainProcessor::RunCore()
             LastSend = NowMs(); // no dongle session yet: just keep consuming frames
             continue;
         }
-        bool ForceIdr = !WasReady || m_Session->TakeIdrRequest();
-        WasReady = true;
-
         double T0 = NowMs();
+        // keyframe on (re)connect and every 2 s, so a lost frame never leaves the dongle stuck for long
+        bool ForceIdr = !WasReady || m_Session->TakeIdrRequest() || T0 - LastIdr >= 2000;
+        if (ForceIdr)
+            LastIdr = T0;
+        WasReady = true;
         LastSend = T0;
         if (FAILED(Enc.Encode(Last.Get(), ForceIdr)))
         {
@@ -1037,6 +1054,19 @@ void SwapChainProcessor::RunCore()
         if (!Enc.Au.empty() && !m_Usb->SendFrame(Enc.Au.data(), Enc.Au.size(), Enc.Width, Enc.Height))
         {
             DrongLog("usb frame write failed");
+        }
+        if (DumpFrames < 150 && !Enc.Au.empty())
+        {
+            // diagnostics: the first ~3 s of every stream, decodable with ffmpeg
+            HANDLE f = CreateFileW(L"C:\\ProgramData\\drong-display\\stream-start.h264", DumpFrames ? FILE_APPEND_DATA : GENERIC_WRITE,
+                                   FILE_SHARE_READ, nullptr, DumpFrames ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f != INVALID_HANDLE_VALUE)
+            {
+                DWORD w;
+                WriteFile(f, Enc.Au.data(), (DWORD)Enc.Au.size(), &w, nullptr);
+                CloseHandle(f);
+            }
+            DumpFrames++;
         }
         double T2 = NowMs();
         Frames++, Bytes += Enc.Au.size(), EncSum += T1 - T0, UsbSum += T2 - T1;
