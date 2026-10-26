@@ -1,0 +1,31 @@
+<?xml version='1.0' encoding='utf-8'?>
+<vdd_settings>
+    <monitors>
+        <count>1</count>
+    </monitors>
+    <gpu>
+        <friendlyname>default</friendlyname>
+    </gpu>
+    <global>
+        <g_refresh_rate>60</g_refresh_rate>
+    </global>
+    <resolutions>
+        <!-- the Drong dongle's native mode (device reports 1080P60) -->
+        <resolution>
+            <width>1920</width>
+            <height>1080</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+    </resolutions>
+    <options>
+        <CustomEdid>true</CustomEdid> <!-- user_edid.bin from make_edid.py: name "USB-Monitor" -->
+        <PreventSpoof>false</PreventSpoof>
+        <EdidCeaOverride>false</EdidCeaOverride>
+        <!-- software cursor so the pointer is part of the captured image -->
+        <HardwareCursor>false</HardwareCursor>
+        <SDR10bit>false</SDR10bit>
+        <HDRPlus>false</HDRPlus>
+        <logging>false</logging>
+        <debuglogging>false</debuglogging>
+    </options>
+</vdd_settings>
