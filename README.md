@@ -1,4 +1,4 @@
-# drong-display
+# open-drong-display
 
 An open-source Windows display driver for the **"Drong Display" USB screen dongle** (USB `1CBE:0003`) — a
 replacement for the vendor software, which phones home to a server in China, installs a self-signed root
