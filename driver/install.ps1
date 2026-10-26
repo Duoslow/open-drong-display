@@ -4,9 +4,11 @@
 #   2. trusts that certificate (LocalMachine Root + TrustedPublisher) and then DELETES its private key,
 #      so nothing else can ever be signed with it
 #   3. installs the driver package and forces it onto the dongle's display interface (USB\VID_1CBE&PID_0003&MI_00)
-#   4. disables the Virtual Display Driver (vdd\), which this driver replaces
+#   4. disables the Virtual Display Driver (tools\virtual-display) if present, which this driver replaces
 #
 #   -Uninstall removes the driver package and the certificates again and re-enables the Virtual Display Driver.
+#
+#   Needs the Windows Driver Kit 10.0.26100 (signtool, Inf2Cat) and the dongle plugged in.
 param([switch]$Uninstall, [string]$Log = "$PSScriptRoot\out\install.log")
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force "$PSScriptRoot\out" | Out-Null
@@ -22,8 +24,9 @@ try {
         }
     }
     function Get-OurPublishedInfs {
-        (pnputil /enum-drivers | Out-String) -split "\r?\n\r?\n" | Where-Object { $_ -match 'Original Name:\s+drongidd\.inf' } |
-            ForEach-Object { if ($_ -match 'Published Name:\s+(oem\d+\.inf)') { $Matches[1] } }
+        # oemNN.inf names of our packages in the driver store (DISM objects: independent of the UI language)
+        Get-WindowsDriver -Online | Where-Object { (Split-Path $_.OriginalFileName -Leaf) -eq 'drongidd.inf' } |
+            ForEach-Object { $_.Driver }
     }
     $vdd = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\MttVDD' }
 
@@ -48,9 +51,9 @@ try {
         Set-Content "$pkg\DrongIdd.inf" -Encoding ASCII
     Write-Output "driver version $ver"
 
-    # the user-mode sender would hold the USB interface: stop it cleanly
+    # the user-mode sender (tools\sender) would hold the USB interface: stop it cleanly
     if (Get-Process drongcast -ErrorAction SilentlyContinue) {
-        New-Item -ItemType File -Force "$PSScriptRoot\..\native\stop" | Out-Null
+        New-Item -ItemType File -Force "$PSScriptRoot\..\tools\sender\out\stop" | Out-Null
         Start-Sleep 3
         Get-Process drongcast -ErrorAction SilentlyContinue | Stop-Process -Force
     }

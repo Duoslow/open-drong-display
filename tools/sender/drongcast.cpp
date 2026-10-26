@@ -4,7 +4,7 @@
 //   Desktop Duplication of the "USB-Monitor" output (Virtual Display Driver, PnP id MTT1337)
 //   -> copy into a render-target texture, draw the mouse cursor with a tiny shader
 //   -> AMF VideoConverter BGRA->NV12 -> AMF H.264 encoder (ultra-low-latency, 1 ref frame)
-//   -> WinUSB bulk OUT 0x01 using the protocol documented in ../README.md
+//   -> WinUSB bulk OUT 0x01 using the protocol documented in docs/PROTOCOL.md
 //
 // Build: build.bat (MSVC). No third-party code linked; AMF headers are from AMD's MIT-licensed SDK,
 // the AMF runtime (amfrt64.dll) ships with the AMD driver.

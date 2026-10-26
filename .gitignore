@@ -1,15 +1,14 @@
 # build outputs
+out/
 *.exe
 *.obj
 *.pdb
 *.ilk
-# fetched by native/build.bat
-native/third_party/
+
+# fetched by tools/fetch-amf.cmd
+third_party/
 
 # runtime
 *.log
 stop
 __pycache__/
-
-# driver build output (dll, catalog, signed package, logs)
-driver/out/

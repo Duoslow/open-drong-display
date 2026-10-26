@@ -6,7 +6,7 @@ Based on Microsoft's IndirectDisplay sample (IddSampleDriver, Microsoft Public L
 
 The driver binds to the dongle's vendor interface, so Windows gets a "USB-Monitor" (1920x1080 @ 50 Hz) exactly while
 the dongle is plugged in. Each frame Windows composes for that monitor is copied, encoded to H.264 with AMD AMF on the
-render GPU and sent over USB with the protocol documented in ../README.md.
+render GPU and sent over USB with the protocol documented in docs/PROTOCOL.md.
 
 50 Hz is deliberate: the dongle drains its frame queue at roughly 50 frames/s, faster input makes the delay grow.
 

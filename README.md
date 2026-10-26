@@ -1,100 +1,122 @@
 # drong-display
 
-Open replacement for the vendor software of the "Drong Display" USB screen dongle
-(USB `1CBE:0003`, rev 4.07). No vendor code, no phone-home.
+An open-source Windows display driver for the **"Drong Display" USB screen dongle** (USB `1CBE:0003`) — a
+replacement for the vendor software, which phones home to a server in China, installs a self-signed root
+certificate and downloads adverts (see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md)).
 
-## Why
+Plug the dongle in and Windows gets an extra monitor, **USB-Monitor (1920×1080 @ 50 Hz)**, that behaves like any
+other screen: extend the desktop onto it, drag windows to it, put SimHub dashboards on it. Unplug it and the monitor
+goes away. No background program, no network access, no vendor code.
 
-The vendor installer (`E:\Drong Display.exe`, SHA-256 `35C9BA52…7296`, unsigned Advanced Installer) installs:
+> Not affiliated with or endorsed by the maker of the dongle. The USB protocol was reverse-engineered for
+> interoperability; see [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-- `IddSampleDriver.dll` – Microsoft's IddCx sample + FFmpeg 6.1/x264 (GPL, no source offered), signed with a
-  WDK *test* certificate; catalog signed by self-signed `DrongCert` (thumbprint `FBC274FB…8E80`) which the MSI
-  adds to the trusted stores.
-- The driver itself talks to `ds.dronghootin.com.cn`: `authProduct`, `isCompatibility`,
-  `saveOrRefreshProductOnline`, `uploadErrorLog`, `getAdvertising`, `upgradeFirmware`, `productPreview/upload`.
-  It sends device serial/model/usage time plus PC manufacturer/model/GPU (WMI `Win32_ComputerSystem`).
-- `DrongUsbService.exe` (service, named pipe `\\.\pipe\Drongpipe`) → `a.bat` → `CheckPackageRun.exe` elevated,
-  which downloads an advert video (`Advert.h264`) and firmware.
-
-## Protocol (from static analysis of IddSampleDriver.dll)
-
-Interface 0 (vendor class), bulk OUT `0x01`, bulk IN `0x81`. Every command is a 512-byte packet whose
-first 24 bytes are six big-endian u32: `cmd, arg1, 0, arg2/len, 0, 0`. Data payloads follow as separate
-transfers, zero-padded to a multiple of 512.
-
-| dir | cmd | args | meaning |
-|---|---|---|---|
-| ctrl | `A1 09 0000 0000 0001` | | "SendMsg9" (class IN request) at start |
-| → | `0x74` | 1, 16 + 16 bytes | challenge; device answers `0x75` + 16 bytes (PC-side check, ignorable) |
-| → | `0x02` | 1, 0 | init / wait for monitor |
-| ← | `0xA0` | | monitor connected → PC sends `0x77` (1, 0) |
-| ← | `0x71` | len | URL the device wants fetched (`http://8.134.59.18/drongscreen/…/product_sabbat_dual.abs`) — ignored |
-| ← | `0x77` | len | device info, JSON (prodtype, version, uuid, monitor, resolution `1080P60`, …) |
-| ← | `0x57` | | nonce request → PC sends `0x58` (1, 16) + 16 random bytes |
-| → | `0x54` / `0x55` | 2, 0 | report unauthorized / authorized (vendor decides via its server) |
-| → | `0x67` | 2, chunkLen | frame chunk header; bytes 24..63 = `total, chunkLen, nChunks, idx(1-based), 1, width, height, 0, 0, 0`; then the H.264 chunk |
-| → | `0x63` | 2, 28 + 28 bytes | hardware cursor update |
-| ← | `0xA1` | | monitor disconnected |
-| → | `0x6a`/`0x6b`/`0x6c` | | firmware-update path — **not implemented on purpose** |
-
-Frames: H.264 Constrained Baseline (CAVLC, no B-frames), Annex-B, one access unit per frame, chunks ≤ 0xA0000 bytes.
-The vendor uses 1920×1080 for its advert stream.
-
-### Behaviour learned on hardware
-
-- Send an empty cursor packet (`0x63`, 28 zero bytes) before the first frame.
-- The SPS must allow showing frames immediately: 1 reference frame → `max_dec_frame_buffering = 1`
-  (AMF defaults to 4, which lets the dongle hold ~4 frames).
-- **Never send more than ~50 frames/s.** The dongle queues frames and drains them slower than its 60 Hz output;
-  at 53+ fps the queue (and the delay) grows to seconds.
-- Do **not** send `0x03` (stop) on exit: afterwards the dongle ignores everything until it is replugged.
-  Without it, a new session works right away — the dongle answers the handshake but does not repeat `0xA0`,
-  so ask for `0x77` yourself.
-- The device repeats `0x77` (info) as a keep-alive.
-- **Send a steady stream.** At ~10 fps (only on screen changes) the dongle shows black; repeat the last frame so it
-  gets 40–50 fps even on a still screen.
-- Start streaming only after the device info (`0x77`) arrived, and send a keyframe at least every 2 s.
-
-## Driver (`driver/`, branch `driver`)
-
-`DrongIdd` is an IddCx display driver (UMDF 2.25 / IddCx 1.4, based on Microsoft's IndirectDisplay sample, MS-PL).
-It binds to the dongle's display interface, so Windows gets a **USB-Monitor (1920×1080 @ 50 Hz)** exactly while the
-dongle is plugged in — no background program, no virtual display. Each frame is copied on the GPU, encoded with AMF
-and sent with the protocol above. Log: `C:\ProgramData\drong-display\driver.log`; the first ~3 s of every stream
-are saved as `stream-start.h264` for diagnostics.
-
-Build and install (needs the Windows Driver Kit 10.0.26100):
+## How it works
 
 ```
-driver\build.bat
-powershell -ExecutionPolicy Bypass -File driver\install.ps1      (elevated)
+Windows desktop compositor
+   │  frames for "USB-Monitor"            (IddCx swap-chain, on the GPU)
+   ▼
+DrongIdd.dll  (UMDF 2 / IddCx display driver, bound to the dongle's USB interface 0)
+   │  GPU copy → AMD AMF: BGRA→NV12 → H.264 (constrained baseline, ultra-low-latency, 1 ref frame)
+   ▼
+USB bulk OUT 0x01  — reverse-engineered protocol, ≤ 50 frames/s
+   ▼
+dongle (embedded Linux) decodes H.264 → HDMI
+```
+
+Measured on a Radeon RX 9060 XT: ~2.7 ms encode + ~1–2 ms USB per frame.
+
+## Requirements
+
+- Windows 10 2004 or newer / Windows 11, x64
+- **An AMD Radeon GPU with a hardware video encoder** (the driver encodes with AMD AMF; NVIDIA/Intel are not
+  supported yet)
+- The dongle: USB ID `1CBE:0003`, shows up as *windows mirroring interface*, *Drong USB Audio Device* and a small
+  USB drive with `Drong Display.exe` on it
+- To build: Visual Studio 2022 or newer with the C++ desktop workload, git, and the
+  **Windows Driver Kit 10.0.26100** (`winget install Microsoft.WindowsWDK.10.0.26100`)
+
+## Install
+
+There are no prebuilt binaries: Windows only loads drivers signed by a certificate it trusts, so the install script
+signs the driver on your machine (see [Signing](#signing)).
+
+1. **Do not** run the vendor installer from the dongle's USB drive. If you already did, uninstall *Drong Display*
+   and remove the `DrongCert` certificate (Trusted Root and Trusted Publishers).
+2. Plug in the dongle.
+3. Build (from a normal command prompt):
+   ```
+   driver\build.bat
+   ```
+4. Install (from an **administrator** PowerShell):
+   ```
+   powershell -ExecutionPolicy Bypass -File driver\install.ps1
+   ```
+   The log is written to `driver\out\install.log`.
+
+USB-Monitor appears a few seconds later. Arrange it in *Settings → System → Display*; Windows remembers its position
+across replugs.
+
+To update after changing the code, run both steps again — every install gets a new driver version so Windows
+replaces the old one.
+
+### Uninstall
+
+```
 powershell -ExecutionPolicy Bypass -File driver\install.ps1 -Uninstall
 ```
 
-`install.ps1` signs the driver with a one-off certificate ("drong-display local driver signing"), trusts it and
-**deletes its private key** right after signing, stamps a new driver version, installs the package on the dongle
-and disables the Virtual Display Driver from `vdd/`.
+removes the driver package and the signing certificates. The dongle's display interface is then without a driver
+until you install one again.
 
-## Layout
+### Optional: hide the dongle's USB drive and audio device
 
-| path | what |
+The dongle also exposes a small USB drive (holding the vendor installer) and an audio device. If you don't want them,
+disable *USB Mass Storage Device* and *Drong USB Audio Device* under the dongle in Device Manager, or:
+
+```powershell
+Get-PnpDevice -PresentOnly | ? InstanceId -match 'VID_1CBE&PID_0003&MI_0[13]' | Disable-PnpDevice -Confirm:$false
+```
+
+(Disabled devices are remembered per USB port.)
+
+## Signing
+
+`install.ps1` creates a code-signing certificate (`CN=drong-display local driver signing`), signs the driver and
+its catalog, adds the certificate to the machine's *Trusted Root* and *Trusted Publishers* stores and then
+**deletes the private key**. Nothing else can ever be signed with that certificate — unlike a vendor certificate
+whose key lives somewhere else. Each install replaces the previous certificate; `-Uninstall` removes it.
+
+No test-signing mode is needed: this is a user-mode (UMDF) driver, which Windows checks against the trusted
+certificate stores rather than Microsoft's kernel-mode signing requirements.
+
+## Troubleshooting
+
+The driver logs to `C:\ProgramData\drong-display\driver.log` (handshake, device info, stream statistics every 30 s).
+It also saves the first ~3 seconds of every stream as `C:\ProgramData\drong-display\stream-start.h264` — play it
+with `ffplay` to see exactly what was sent.
+
+| Symptom | Cause / fix |
 |---|---|
-| `native/` | **drongcast.exe** – the sender (C++): Desktop Duplication → GPU cursor overlay → AMF BGRA→NV12 → AMF H.264 (ultra-low-latency) → WinUSB. ~5 ms encode+USB, 50 fps cap. |
-| `vdd/` | the open-source [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) (signed by SignPath), configured as one 1920×1080@60 monitor named **USB-Monitor** (`make_edid.py`) |
-| `drongcast.py` | first prototype (Python + ffmpeg); kept for protocol experiments (`--variants`, `--source test`) |
+| Black screen on the dongle's monitor | Check the log for `streaming` and the fps line. If the dongle stopped answering (`usb frame write failed`, `not answering`), unplug it, wait 5 s and plug it back in. |
+| Delay grows over time | The dongle drains frames at only ~50/s; the driver's 50 Hz mode keeps below that. Don't raise the refresh rate. |
+| USB-Monitor missing | Device Manager → *Display adapters* → *Drong USB Display (USB-Monitor)* should be present without a warning sign. Re-run `install.ps1`. |
+| `install.ps1`: *UpdateDriverForPlugAndPlayDevices failed* | The dongle wasn't plugged in. |
 
-## Setup
+## Project layout
 
-1. Bind Microsoft's WinUSB driver to the display interface (only interface 0):
-   Device Manager → *Other devices* → **windows mirroring interface** → Update driver → Browse my computer →
-   Let me pick → *Universal Serial Bus devices* → **WinUsb Device** → Next → Yes.
-   (Undo: uninstall that device in Device Manager.)
-2. Install the virtual monitor (elevated): `powershell -ExecutionPolicy Bypass -File vdd\install-vdd.ps1`
-   (after changing `vdd_settings.xml` / the EDID: add `-Apply`).
-3. Build and run: `native\build.bat`, then `native\drongcast.exe --forever`.
-   Stop cleanly by creating a file named `stop` next to the exe.
+| Path | |
+|---|---|
+| `driver/` | **DrongIdd**, the display driver (IddCx), its INF, `build.bat` and `install.ps1` |
+| `docs/PROTOCOL.md` | The dongle's USB protocol and what we learned on real hardware |
+| `docs/VENDOR-SOFTWARE.md` | What the vendor installer and driver do |
+| `tools/` | Earlier user-mode approach: a sender program + a virtual monitor, and the Python prototype used to work out the protocol — see [tools/README.md](tools/README.md) |
+| `third_party/` | AMD AMF SDK headers, fetched by `tools/fetch-amf.cmd` on first build (not committed) |
 
-`drongcast.exe` options: `--max-fps N` (default 50), `--bitrate MBPS` (default 15), `--no-cursor`, `--monitor ID`, `-v`.
+## License
 
-Optional: the dongle's mass-storage (`MI_03`, shows as a drive with the vendor installer) and audio (`MI_01`)
-interfaces can be disabled in Device Manager.
+MIT (see [LICENSE](LICENSE)), except `driver/`, which is derived from Microsoft's
+[IndirectDisplay sample](https://github.com/microsoft/Windows-driver-samples/tree/main/video/IndirectDisplay) and is
+distributed under the Microsoft Public License ([driver/LICENSE-IddSample.txt](driver/LICENSE-IddSample.txt)).
+AMD AMF headers are fetched from [GPUOpen](https://github.com/GPUOpen-LibrariesAndSDKs/AMF) at build time (MIT).

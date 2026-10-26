@@ -1,9 +1,23 @@
-# Installs the open-source Virtual Display Driver (Root\MttVDD) as one virtual 1920x1080@60 monitor.
-# Equivalent of "devcon install MttVDD.inf Root\MttVDD". Run elevated.
-param([string]$Log = "$PSScriptRoot\install-vdd.log", [switch]$Apply)
+# Installs the open-source Virtual Display Driver (https://github.com/VirtualDrivers/Virtual-Display-Driver, MIT,
+# signed via SignPath) as one virtual 1920x1080 monitor named "USB-Monitor", for tools/sender/drongcast.exe.
+# Not needed with the DrongIdd driver. Equivalent of "devcon install MttVDD.inf Root\MttVDD". Run elevated.
+#   -Apply   only copy vdd_settings.xml / user_edid.bin and restart the device
+param([string]$Log = "$PSScriptRoot\out\install-vdd.log", [switch]$Apply)
 $ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Force "$PSScriptRoot\out" | Out-Null
 Start-Transcript -Path $Log -Force | Out-Null
+$Release = 'https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip'
+$ReleaseSha256 = 'E24210692B442B39AF763536330CE78B423F19342B7A7792C26DE3944E418B3A'
 try {
+    # fetch the pinned, signed release once and check it is exactly the file this script was written for
+    $inf = "$PSScriptRoot\out\VirtualDisplayDriver\MttVDD.inf"
+    if (-not $Apply -and -not (Test-Path $inf)) {
+        $zip = "$PSScriptRoot\out\vdd.zip"
+        Invoke-WebRequest -UseBasicParsing $Release -OutFile $zip
+        if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $ReleaseSha256) { throw 'downloaded Virtual Display Driver does not match the expected SHA-256' }
+        Expand-Archive $zip "$PSScriptRoot\out" -Force
+    }
+
     # The driver reads its settings from this fixed path
     New-Item -ItemType Directory -Force C:\VirtualDisplayDriver | Out-Null
     Copy-Item "$PSScriptRoot\vdd_settings.xml", "$PSScriptRoot\user_edid.bin" C:\VirtualDisplayDriver\ -Force
@@ -15,7 +29,7 @@ try {
 
     if (Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\MttVDD' }) {
         Write-Output 'Root\MttVDD device already exists; updating driver only'
-        pnputil /add-driver "$PSScriptRoot\MttVDD.inf" /install
+        pnputil /add-driver $inf /install
         return
     }
 
@@ -59,7 +73,7 @@ public static class RootDev {
     }
 }
 '@
-    Write-Output ([RootDev]::Install("$PSScriptRoot\MttVDD.inf", 'Root\MttVDD'))
+    Write-Output ([RootDev]::Install($inf, 'Root\MttVDD'))
 }
 catch { Write-Output "ERROR: $_" }
 finally { Stop-Transcript | Out-Null }

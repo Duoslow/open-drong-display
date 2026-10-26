@@ -1,18 +1,19 @@
 @echo off
-rem Builds DrongIdd.dll (UMDF 2.25 / IddCx 1.4 display driver) with MSVC + the Windows Driver Kit.
+rem Builds DrongIdd.dll (UMDF 2.25 / IddCx 1.4 display driver) with MSVC + the Windows Driver Kit 10.0.26100.
 setlocal
 cd /d "%~dp0"
-set "AMF=..\native\third_party\amf-sdk\amf\public\include"
-if not exist "%AMF%\core\Factory.h" (
-    git clone --depth 1 --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git ..\native\third_party\amf-sdk || exit /b 1
-    git -C ..\native\third_party\amf-sdk sparse-checkout set amf/public/include || exit /b 1
-)
+call ..\tools\fetch-amf.cmd || exit /b 1
+set "AMF=..\third_party\amf-sdk\amf\public\include"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" 10.0.26100.0 >nul || exit /b 1
 cd /d "%~dp0"
 set "KIT=%ProgramFiles(x86)%\Windows Kits\10"
 set "SDKVER=10.0.26100.0"
+if not exist "%KIT%\Include\wdf\umdf\2.25\wdf.h" (
+    echo Windows Driver Kit not found. Install it with: winget install Microsoft.WindowsWDK.10.0.26100
+    exit /b 1
+)
 if not exist out mkdir out
 cl /nologo /std:c++17 /EHsc /O2 /W3 /MD /LD /Zi ^
    /DUNICODE /D_UNICODE /D_WINDLL /DUMDF_VERSION_MAJOR=2 /DUMDF_VERSION_MINOR=25 ^

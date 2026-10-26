@@ -129,7 +129,7 @@ class Dongle:
         try:
             usb.util.claim_interface(self.dev, 0)
         except usb.core.USBError as e:
-            raise DongleError(f"cannot open interface 0 ({e}). Bind WinUSB to 'windows mirroring interface' first (see README.md).")
+            raise DongleError(f"cannot open interface 0 ({e}). Bind WinUSB to 'windows mirroring interface' first (see tools/README.md).")
         self.verbose = verbose
         self.lock = threading.Lock()
         self.info = {}
