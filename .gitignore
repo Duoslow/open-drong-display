@@ -5,7 +5,7 @@ out/
 *.pdb
 *.ilk
 
-# fetched by tools/fetch-amf.cmd
+# fetched by scripts/fetch-amf.cmd
 third_party/
 
 # runtime
