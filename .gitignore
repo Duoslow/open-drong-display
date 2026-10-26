@@ -10,3 +10,6 @@ native/third_party/
 *.log
 stop
 __pycache__/
+
+# driver build output (dll, catalog, signed package, logs)
+driver/out/

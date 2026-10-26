@@ -1,0 +1,74 @@
+;
+; DrongIdd.inf - display driver for the "Drong Display" USB screen dongle (interface 0 of USB 1CBE:0003).
+; Based on Microsoft's IndirectDisplay sample INF (Microsoft Public License).
+;
+
+[Version]
+PnpLockDown=1
+Signature="$Windows NT$"
+ClassGUID = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Class = Display
+ClassVer = 2.0
+Provider=%ManufacturerName%
+CatalogFile=DrongIdd.cat
+DriverVer = 10/26/2026,1.0.0.0
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64.10.0...19041
+
+[Standard.NTamd64.10.0...19041]
+%DeviceName%=DrongIdd_Install, USB\VID_1CBE&PID_0003&MI_00
+
+[SourceDisksFiles]
+DrongIdd.dll=1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+; =================== UMDF Device ==================================
+
+[DrongIdd_Install.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+CopyFiles=UMDriverCopy
+
+[DrongIdd_Install.NT.hw]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg = DrongIdd_HardwareDeviceSettings
+
+[DrongIdd_HardwareDeviceSettings]
+HKR,, "UpperFilters",  %REG_MULTI_SZ%, "IndirectKmd"
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "DrongIddGroup"
+
+[DrongIdd_Install.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[DrongIdd_Install.NT.Wdf]
+UmdfService=DrongIdd,DrongIdd_Install
+UmdfServiceOrder=DrongIdd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+; USB I/O goes straight from the UMDF reflector to the USB stack
+UmdfDispatcher = NativeUSB
+
+[DrongIdd_Install]
+UmdfLibraryVersion=2.25.0
+ServiceBinary=%13%\DrongIdd.dll
+UmdfExtensions = IddCx0102
+
+[DestinationDirs]
+UMDriverCopy=13 ; run from the driver store
+
+[UMDriverCopy]
+DrongIdd.dll
+
+; =================== Generic ==================================
+
+[Strings]
+ManufacturerName="drong-display (open source)"
+DiskName = "DrongIdd Installation Disk"
+DeviceName="Drong USB Display (USB-Monitor)"
+
+REG_MULTI_SZ  = 0x00010000
+REG_SZ        = 0x00000000
