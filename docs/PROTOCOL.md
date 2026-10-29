@@ -38,7 +38,7 @@ The vendor driver polls `0x81` with a 5 ms timeout.
 | 1 | control IN | `bmRequestType=0xA1, bRequest=9, wValue=0, wIndex=0, wLength=1` | device answers 1 byte (`0xBE`) |
 | 2 | → | `0x74 (1, 16)` + 16 random bytes | challenge |
 | 3 | ← | `0x75 (…, 16)` + 16 bytes | answer — the vendor PC software uses it to verify the device; can be ignored |
-| 4 | → | `0x02 (1, 0)` | init / "wait for monitor" |
+| 4 | → | `0x02 (1, 0)` | display start (the vendor also sends it whenever Windows hands its monitor a new swap-chain) |
 | 5 | ← | `0xA0` | monitor connected → reply `0x77 (1, 0)` |
 | 6 | ← | `0x71 (…, len)` + text | URL the device wants fetched (`http://8.134.59.18/drongscreen/…/product_sabbat_dual.abs`) — ignore |
 | 7 | ← | `0x77 (…, len)` + JSON | device info, see below |
@@ -67,7 +67,7 @@ repeats this packet periodically as a keep-alive.
 | → | `0x55 (2, 0)` / `0x54 (2, 0)` | "PC authorized / unauthorized". The vendor driver asks its server and sends `0x54` if the answer is no; never needed. |
 | ← | `0xA1` | HDMI monitor disconnected |
 | → | `0x6A`, `0x6B`, `0x6C` | firmware update — not implemented on purpose |
-| → | `0x03 (1, 0)` | stop. **Avoid:** afterwards the device ignores everything (even the control request) until it is replugged. |
+| → | `0x03 (1, 0)` | display stop — the vendor sends it when Windows takes the monitor's swap-chain away. The device then shows its built-in promo picture ("install the driver"); HDMI stays on. `0x02` resumes in the same session. **Don't** start a new session after it (control request + handshake): the device then ignores everything until it is replugged. |
 
 ## Video
 

@@ -135,6 +135,7 @@ with `ffplay` to see exactly what was sent.
 | USB-Monitor missing | Device Manager → *Display adapters* → *Drong USB Display (USB-Monitor)* should be present without a warning sign. Re-run `install.ps1`. |
 | `install.ps1`: *UpdateDriverForPlugAndPlayDevices failed* | The dongle wasn't plugged in. |
 | Picture freezes with a non-AMD encoder | Please open an issue with `driver.log` and `stream-start.h264` attached. As a workaround, force `mf-software` (see [Video encoders](#video-encoders)). |
+| Black screen although the log shows a healthy fps line (real frames flowing, `usb` time small) | The dongle's decoder is stuck — it accepts frames but doesn't render them. Change USB-Monitor's resolution in *Settings → System → Display* and change it back; that re-initializes the decoder. (A plug cycle may not clear this on its own.) |
 
 ## Alternative usage
 
