@@ -65,6 +65,10 @@ USB-Monitor appears a few seconds later. Arrange it in *Settings → System → 
 across replugs. The resolution can be set there too: **1920×1080** (default), **1600×900** or **1280×720**, always
 at 50 Hz — the dongle scales the picture to its HDMI monitor.
 
+When USB-Monitor is switched off — Windows turning the displays off to save power, *Disconnect this display* in
+Display settings, or a tool that changes the display configuration — the dongle shows **black** until it is switched
+on again. (The dongle has no known way to turn its HDMI output off, so its monitor stays on, showing black.)
+
 To update, run steps 3 and 4 again — every install gets a new driver version so Windows replaces the old one.
 Swapping the driver resets the dongle, and occasionally it doesn't come back on its own; `install.ps1` checks for
 that and tells you to unplug and replug it.

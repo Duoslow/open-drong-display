@@ -142,6 +142,34 @@ static void BuildEdid(BYTE e[128])
 
 static BYTE g_Edid[128];
 
+// Windows turning the displays off (power saving) does not reach an indirect display driver as an IddCx event: the
+// compositor just stops presenting. The console display state notification tells us, so the dongle can show black
+// instead of repeating the last frame forever.
+static std::atomic<bool> g_DisplayOn{true};
+static HPOWERNOTIFY g_DisplayNotify = nullptr;
+
+static ULONG CALLBACK OnDisplayState(PVOID Context, ULONG Type, PVOID Setting)
+{
+    UNREFERENCED_PARAMETER(Context);
+    auto* S = (POWERBROADCAST_SETTING*)Setting;
+    if (Type == PBT_POWERSETTINGCHANGE && S && S->PowerSetting == GUID_CONSOLE_DISPLAY_STATE && S->DataLength >= sizeof(DWORD))
+    {
+        DWORD State = *(DWORD*)S->Data; // 0 off, 1 on, 2 dimmed
+        bool On = State != 0;
+        if (g_DisplayOn.exchange(On) != On)
+            DrongLog("Windows turned the displays %s", On ? "on" : "off");
+    }
+    return ERROR_SUCCESS;
+}
+
+static void WatchDisplayState()
+{
+    static DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS Params = {OnDisplayState, nullptr};
+    DWORD r = PowerSettingRegisterNotification(&GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_CALLBACK, &Params, &g_DisplayNotify);
+    if (r != ERROR_SUCCESS)
+        DrongLog("display state notifications unavailable (%lu)", r);
+}
+
 #pragma endregion
 
 #pragma region helpers
@@ -401,6 +429,33 @@ void DongleSession::Stop()
     m_Ready = false;
 }
 
+void DongleSession::StartIdle(std::vector<BYTE> A, std::vector<BYTE> B, ULONG W, ULONG H)
+{
+    std::lock_guard<std::mutex> g(m_IdleLock);
+    m_Idle[0] = std::move(A), m_Idle[1] = std::move(B);
+    m_IdleW = W, m_IdleH = H;
+    m_IdleActive = !m_Idle[0].empty() && !m_Idle[1].empty();
+    m_IdleLast = 0;
+}
+
+void DongleSession::StopIdle()
+{
+    std::lock_guard<std::mutex> g(m_IdleLock); // waits for a black frame being sent right now
+    m_IdleActive = false;
+}
+
+// Sends the next black frame, ~every 20 ms (50 fps). The two IDRs alternate so consecutive frames differ in
+// idr_pic_id, as H.264 requires.
+void DongleSession::FeedIdle()
+{
+    std::lock_guard<std::mutex> g(m_IdleLock);
+    if (!m_IdleActive || NowMs() - m_IdleLast < 19)
+        return;
+    m_IdleLast = NowMs();
+    const auto& Au = m_Idle[m_IdleCount++ & 1];
+    m_Usb->SendFrame(Au.data(), Au.size(), m_IdleW, m_IdleH);
+}
+
 bool DongleSession::Handshake()
 {
     if (!m_Usb->ControlMsg9())
@@ -442,6 +497,23 @@ bool DongleSession::Handshake()
 
 void DongleSession::Run()
 {
+    // black stream while USB-Monitor is off: its own thread, so the event reads below stay undisturbed
+    std::thread Feeder([this] {
+        timeBeginPeriod(1); // 20 ms pacing needs better than the default 15.6 ms timer tick
+        while (!m_Quit)
+        {
+            if (m_Ready)
+                FeedIdle();
+            Sleep(5);
+        }
+        timeEndPeriod(1);
+    });
+    RunLoop();
+    Feeder.join();
+}
+
+void DongleSession::RunLoop()
+{
     while (!m_Quit)
     {
         if (!Handshake())
@@ -469,6 +541,8 @@ void DongleSession::Run()
         while (!m_Quit)
         {
             ULONG Ev[6];
+            // keep this read long: cancelling it often (e.g. every 20 ms) loses dongle events, and the dongle then
+            // blanks its output
             int r = m_Usb->ReadEvent(Ev, 100);
             if (r < 0)
             {
@@ -1279,6 +1353,7 @@ extern "C" NTSTATUS DriverEntry(
     CreateDirectoryW(kLogDir, nullptr);
     BuildEdid(g_Edid);
     DrongLog("DrongIdd driver loaded");
+    WatchDisplayState();
 
     WDF_OBJECT_ATTRIBUTES Attributes;
     WDF_OBJECT_ATTRIBUTES_INIT(&Attributes);
@@ -1535,8 +1610,46 @@ void SwapChainProcessor::RunCore()
     constexpr double MinIntervalMs = 15;
 
     ComPtr<ID3D11Texture2D> Last; // our copy of the newest frame (Windows owns the swap-chain surfaces)
+    ComPtr<ID3D11Texture2D> Black; // sent when the display goes off, so the dongle doesn't keep the last picture
     std::unique_ptr<FrameEncoder> Enc;
-    bool NewFrame = false, WasReady = false;
+    bool NewFrame = false, WasReady = false, BlackSent = false, Terminating = false;
+    bool OwnStream = false; // this thread, not the session's black stream, is feeding the dongle
+
+    // Hands the dongle over to the session's black stream: two black IDRs, repeated until real frames return.
+    // Stopping the stream instead would leave the dongle ignoring frames once they come back.
+    auto SendBlack = [&](const char* Why)
+    {
+        if (!Last || !Enc || !m_Session->Ready())
+            return;
+        if (!Black)
+        {
+            D3D11_TEXTURE2D_DESC Desc;
+            Last->GetDesc(&Desc);
+            ComPtr<ID3D11RenderTargetView> Rtv;
+            const float Rgba[4] = {0, 0, 0, 1};
+            if (FAILED(m_Device->Device->CreateTexture2D(&Desc, nullptr, &Black)) ||
+                FAILED(m_Device->Device->CreateRenderTargetView(Black.Get(), nullptr, &Rtv)))
+            {
+                Black.Reset();
+                return;
+            }
+            m_Device->DeviceContext->ClearRenderTargetView(Rtv.Get(), Rgba);
+        }
+        std::vector<BYTE> Idr[2];
+        for (auto& A : Idr)
+        {
+            if (FAILED(Enc->Encode(Black.Get(), true)) || Enc->Au.empty())
+            {
+                DrongLog("could not encode the black frame");
+                return;
+            }
+            A = Enc->Au;
+        }
+        m_Session->StartIdle(std::move(Idr[0]), std::move(Idr[1]), Enc->Width, Enc->Height);
+        OwnStream = false;
+        BlackSent = true;
+        DrongLog("dongle shows black (%s)", Why);
+    };
     double LastSend = 0, LastIdr = 0, StatT = NowMs(), EncSum = 0, UsbSum = 0;
     ULONG64 Frames = 0, Bytes = 0;
     int DumpFrames = 0;
@@ -1555,6 +1668,10 @@ void SwapChainProcessor::RunCore()
         {
             double Since = NowMs() - LastSend;
             DWORD Timeout = Last && Since < KeepAliveMs ? (DWORD)(KeepAliveMs - Since) + 1 : (Last ? 0 : 100);
+            if (BlackSent && !g_DisplayOn)
+            {
+                Timeout = 100; // displays are off and the dongle shows black: nothing to send, just watch
+            }
             if (Timeout > 0)
             {
                 // We must wait for a new buffer
@@ -1571,7 +1688,9 @@ void SwapChainProcessor::RunCore()
                 }
                 else if (WaitResult == WAIT_OBJECT_0 + 1)
                 {
-                    // We need to terminate
+                    // We need to terminate (Windows released the monitor, e.g. it was disconnected in Display
+                    // settings): blank the dongle on the way out
+                    Terminating = true;
                     break;
                 }
                 else if (WaitResult != WAIT_TIMEOUT)
@@ -1647,6 +1766,27 @@ void SwapChainProcessor::RunCore()
             LastSend = NowMs(); // no dongle session yet: just keep consuming frames
             continue;
         }
+        if (!g_DisplayOn)
+        {
+            if (!BlackSent)
+            {
+                SendBlack("Windows turned the displays off");
+            }
+            LastSend = NowMs();
+            continue;
+        }
+        if (BlackSent)
+        {
+            BlackSent = false;
+            WasReady = false; // displays back on: start again with an IDR of the real picture
+        }
+        if (!OwnStream)
+        {
+            // take the dongle back from the black stream (if it was running) and restart with an IDR
+            m_Session->StopIdle();
+            OwnStream = true;
+            WasReady = false;
+        }
         double T0 = NowMs();
         // keyframe on (re)connect and every 2 s, so a lost frame never leaves the dongle stuck for long
         bool ForceIdr = !WasReady || m_Session->TakeIdrRequest() || T0 - LastIdr >= 2000;
@@ -1695,6 +1835,11 @@ void SwapChainProcessor::RunCore()
                      Frames ? EncSum / Frames : 0, Frames ? UsbSum / Frames : 0);
             StatT = T2, Frames = Bytes = 0, EncSum = UsbSum = 0;
         }
+    }
+    if (!BlackSent)
+    {
+        // whatever ended this swap-chain, keep the dongle fed until the next one arrives
+        SendBlack(Terminating ? "Windows released USB-Monitor" : "swap-chain ended");
     }
     (void)NewFrame;
 }

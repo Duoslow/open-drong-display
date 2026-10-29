@@ -99,5 +99,10 @@ bytes 24..63  totalLen, chunkLen, nChunks, chunkIndex (1-based), 1, width, heigh
   is being written), the device's firmware may crash and drop off USB until it is power-cycled. Finish the frame in
   flight before stopping.
 - Multiple slices per frame and SEI NAL units are fine; access unit delimiters (type 9) are fine.
+- **Never pause the stream.** If no frames arrive for a few seconds, the device keeps showing black (or the last
+  picture) and ignores frames that come later, until it is power-cycled. When there is nothing to show, keep sending
+  black frames (the vendor driver plays an advert video instead).
+- **Keep the event read pending.** Cancelling and re-issuing the bulk-IN read very often (every 20 ms) loses device
+  events, and the device then blanks its output; a 100 ms read timeout works.
 - **Frame sizes:** 1920×1080, 1600×900 and 1280×720 streams all display (the device scales to its HDMI output);
   the width/height in the `0x67` header follow the stream. Larger sizes were not tested.

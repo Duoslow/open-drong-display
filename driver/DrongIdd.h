@@ -17,6 +17,7 @@
 #include <d3d11_2.h>
 #include <avrt.h>
 #include <timeapi.h>
+#include <powrprof.h>
 #include <wrl.h>
 
 #include <atomic>
@@ -84,13 +85,27 @@ namespace Microsoft
             bool Ready() const { return m_Ready; }
             bool TakeIdrRequest() { return m_NeedIdr.exchange(false); }
 
+            // While USB-Monitor shows nothing (switched off, released), the session keeps the dongle fed with
+            // these black IDR frames: after a gap in the stream the dongle ignores new frames.
+            void StartIdle(std::vector<BYTE> A, std::vector<BYTE> B, ULONG W, ULONG H);
+            // Stops the black stream; when it returns no black frame is being or will be sent.
+            void StopIdle();
+
         private:
             bool Handshake();
             void Run();
+            void RunLoop();
+            void FeedIdle();
 
             DongleUsb* m_Usb = nullptr;
             std::thread m_Thread;
             std::atomic<bool> m_Quit{false}, m_Ready{false}, m_NeedIdr{false};
+            std::mutex m_IdleLock;
+            bool m_IdleActive = false;
+            std::vector<BYTE> m_Idle[2];
+            ULONG m_IdleW = 0, m_IdleH = 0;
+            unsigned m_IdleCount = 0;
+            double m_IdleLast = 0;
         };
 
         /// <summary>
