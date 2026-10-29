@@ -18,6 +18,7 @@
 #include <avrt.h>
 #include <timeapi.h>
 #include <powrprof.h>
+#include <wincodec.h>
 #include <wrl.h>
 
 #include <atomic>

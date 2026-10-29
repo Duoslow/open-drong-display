@@ -69,6 +69,15 @@ When USB-Monitor is switched off — Windows turning the displays off to save po
 Display settings, or a tool that changes the display configuration — the dongle shows **black** until it is switched
 on again. (The dongle has no known way to turn its HDMI output off, so its monitor stays on, showing black.)
 
+To show an image instead of black, point `IdleImage` at a PNG, JPG or BMP (it is scaled to fit, centred on black):
+
+```
+reg add "HKLM\SOFTWARE\open-drong-display" /v IdleImage /t REG_SZ /d "C:\path\to\idle.png"
+reg delete "HKLM\SOFTWARE\open-drong-display" /v IdleImage                        (back to plain black)
+```
+
+Toggle USB-Monitor off and on (or replug the dongle) after changing the file or the path, so the driver reloads it.
+
 To update, run steps 3 and 4 again — every install gets a new driver version so Windows replaces the old one.
 Swapping the driver resets the dongle, and occasionally it doesn't come back on its own; `install.ps1` checks for
 that and tells you to unplug and replug it.

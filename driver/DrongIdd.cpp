@@ -1523,6 +1523,73 @@ HRESULT Direct3DDevice::Init()
 
 #pragma endregion
 
+#pragma region idle image
+
+// Builds the WxH BGRA texture shown while USB-Monitor is off: black, with the image at
+// HKLM\SOFTWARE\open-drong-display\IdleImage (PNG/JPG/BMP) letterboxed on top if it is set and loads.
+// Returns true if an image was drawn (false = plain black).
+static bool BuildIdleTexture(ID3D11Device* Dev, ID3D11DeviceContext* Ctx, UINT W, UINT H, ComPtr<ID3D11Texture2D>& Out)
+{
+    D3D11_TEXTURE2D_DESC Td = {W, H, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+                               D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0};
+    Out.Reset();
+    ComPtr<ID3D11RenderTargetView> Rtv;
+    if (FAILED(Dev->CreateTexture2D(&Td, nullptr, &Out)) || FAILED(Dev->CreateRenderTargetView(Out.Get(), nullptr, &Rtv)))
+    {
+        Out.Reset();
+        return false;
+    }
+    const float Black[4] = {0, 0, 0, 1};
+    Ctx->ClearRenderTargetView(Rtv.Get(), Black);
+
+    wchar_t Path[1024] = {};
+    DWORD Size = sizeof Path;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\open-drong-display", L"IdleImage", RRF_RT_REG_SZ, nullptr, Path, &Size) != ERROR_SUCCESS || !Path[0])
+        return false;
+
+    ComPtr<IWICImagingFactory> Wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Wic))))
+        return false;
+    ComPtr<IWICBitmapDecoder> Dec;
+    if (FAILED(Wic->CreateDecoderFromFilename(Path, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &Dec)))
+    {
+        DrongLog("idle image '%ws' could not be opened", Path);
+        return false;
+    }
+    ComPtr<IWICBitmapFrameDecode> Frame;
+    UINT Iw = 0, Ih = 0;
+    if (FAILED(Dec->GetFrame(0, &Frame)) || FAILED(Frame->GetSize(&Iw, &Ih)) || !Iw || !Ih)
+        return false;
+
+    // scale to fit inside WxH, preserving aspect ratio (letterbox)
+    double S = min((double)W / Iw, (double)H / Ih);
+    UINT Dw = max<UINT>(1, (UINT)(Iw * S)), Dh = max<UINT>(1, (UINT)(Ih * S));
+    ComPtr<IWICBitmapScaler> Scaler;
+    ComPtr<IWICFormatConverter> Conv;
+    if (FAILED(Wic->CreateBitmapScaler(&Scaler)) ||
+        FAILED(Scaler->Initialize(Frame.Get(), Dw, Dh, WICBitmapInterpolationModeFant)) ||
+        FAILED(Wic->CreateFormatConverter(&Conv)) ||
+        FAILED(Conv->Initialize(Scaler.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)))
+        return false;
+
+    std::vector<BYTE> Pixels((size_t)Dw * Dh * 4);
+    if (FAILED(Conv->CopyPixels(nullptr, Dw * 4, (UINT)Pixels.size(), Pixels.data())))
+        return false;
+
+    D3D11_TEXTURE2D_DESC Id = {Dw, Dh, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0};
+    D3D11_SUBRESOURCE_DATA Init = {Pixels.data(), Dw * 4, 0};
+    ComPtr<ID3D11Texture2D> ImgTex;
+    if (FAILED(Dev->CreateTexture2D(&Id, &Init, &ImgTex)))
+        return false;
+
+    UINT Ox = (W - Dw) / 2, Oy = (H - Dh) / 2; // centre it
+    Ctx->CopySubresourceRegion(Out.Get(), 0, Ox, Oy, 0, ImgTex.Get(), 0, nullptr);
+    DrongLog("idle image '%ws' loaded (%ux%u -> %ux%u)", Path, Iw, Ih, Dw, Dh);
+    return true;
+}
+
+#pragma endregion
+
 #pragma region SwapChainProcessor
 
 SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, DongleUsb* Usb, DongleSession* Session)
@@ -1610,37 +1677,29 @@ void SwapChainProcessor::RunCore()
     constexpr double MinIntervalMs = 15;
 
     ComPtr<ID3D11Texture2D> Last; // our copy of the newest frame (Windows owns the swap-chain surfaces)
-    ComPtr<ID3D11Texture2D> Black; // sent when the display goes off, so the dongle doesn't keep the last picture
+    ComPtr<ID3D11Texture2D> Idle; // shown when the display goes off (black, or the configured idle image)
     std::unique_ptr<FrameEncoder> Enc;
     bool NewFrame = false, WasReady = false, BlackSent = false, Terminating = false;
     bool OwnStream = false; // this thread, not the session's black stream, is feeding the dongle
 
-    // Hands the dongle over to the session's black stream: two black IDRs, repeated until real frames return.
-    // Stopping the stream instead would leave the dongle ignoring frames once they come back.
+    // Hands the dongle over to the session's idle stream: two IDRs of the idle frame (black, or the idle image),
+    // repeated until real frames return. Stopping the stream instead would leave the dongle ignoring later frames.
     auto SendBlack = [&](const char* Why)
     {
         if (!Last || !Enc || !m_Session->Ready())
             return;
-        if (!Black)
+        if (!Idle)
         {
-            D3D11_TEXTURE2D_DESC Desc;
-            Last->GetDesc(&Desc);
-            ComPtr<ID3D11RenderTargetView> Rtv;
-            const float Rgba[4] = {0, 0, 0, 1};
-            if (FAILED(m_Device->Device->CreateTexture2D(&Desc, nullptr, &Black)) ||
-                FAILED(m_Device->Device->CreateRenderTargetView(Black.Get(), nullptr, &Rtv)))
-            {
-                Black.Reset();
+            BuildIdleTexture(m_Device->Device.Get(), m_Device->DeviceContext.Get(), Enc->Width, Enc->Height, Idle);
+            if (!Idle)
                 return;
-            }
-            m_Device->DeviceContext->ClearRenderTargetView(Rtv.Get(), Rgba);
         }
         std::vector<BYTE> Idr[2];
         for (auto& A : Idr)
         {
-            if (FAILED(Enc->Encode(Black.Get(), true)) || Enc->Au.empty())
+            if (FAILED(Enc->Encode(Idle.Get(), true)) || Enc->Au.empty())
             {
-                DrongLog("could not encode the black frame");
+                DrongLog("could not encode the idle frame");
                 return;
             }
             A = Enc->Au;
@@ -1648,7 +1707,7 @@ void SwapChainProcessor::RunCore()
         m_Session->StartIdle(std::move(Idr[0]), std::move(Idr[1]), Enc->Width, Enc->Height);
         OwnStream = false;
         BlackSent = true;
-        DrongLog("dongle shows black (%s)", Why);
+        DrongLog("dongle shows idle frame (%s)", Why);
     };
     double LastSend = 0, LastIdr = 0, StatT = NowMs(), EncSum = 0, UsbSum = 0;
     ULONG64 Frames = 0, Bytes = 0;
