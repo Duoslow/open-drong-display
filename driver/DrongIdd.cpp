@@ -93,9 +93,17 @@ static double NowMs()
 
 #pragma region monitor description
 
-// One monitor: 1920x1080 @ 50 Hz, named "USB-Monitor". EDID 1.4 with the CEA 1080p50 timing
-// (148.5 MHz, 2640x1125 total).
+// One monitor named "USB-Monitor". EDID 1.4 with the CEA 1080p50 timing (148.5 MHz, 2640x1125 total) as its
+// preferred mode; Windows can also pick the smaller modes below. Every mode is 50 Hz: the dongle drains its frame
+// queue at about 50 frames/s, faster input makes the delay grow.
 static constexpr DWORD kWidth = 1920, kHeight = 1080, kRefresh = 50;
+
+struct DisplayMode
+{
+    DWORD Width, Height;
+};
+static constexpr DisplayMode kModes[] = {{1920, 1080}, {1600, 900}, {1280, 720}}; // [0] = preferred
+static constexpr UINT kModeCount = ARRAYSIZE(kModes);
 
 // Stable container id so Windows remembers the monitor's position across replugs.
 // {6C0C4F65-1E44-4E8D-9C8B-2F0A1D7E5B31}
@@ -521,7 +529,11 @@ struct FrameEncoder
     UINT Width = 0, Height = 0;
 };
 
-static constexpr amf_int64 kBitrate = 15'000'000;
+// 15 Mbit/s at 1920x1080, scaled by pixel count for the smaller modes
+static amf_int64 BitrateFor(UINT W, UINT H)
+{
+    return max<amf_int64>(6'000'000, 15'000'000LL * W * H / (1920 * 1080));
+}
 
 // ---- AMD AMF ---------------------------------------------------------------------------------------------------
 
@@ -572,9 +584,10 @@ struct AmfEncoder : FrameEncoder
             Encoder->SetProperty(AMF_VIDEO_ENCODER_FRAMESIZE, AMFConstructSize((amf_int32)W, (amf_int32)H));
             Encoder->SetProperty(AMF_VIDEO_ENCODER_FRAMERATE, AMFConstructRate(kRefresh, 1));
             Encoder->SetProperty(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR);
-            Encoder->SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, kBitrate);
-            Encoder->SetProperty(AMF_VIDEO_ENCODER_PEAK_BITRATE, kBitrate * 2);
-            Encoder->SetProperty(AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE, kBitrate / kRefresh * 2);
+            const amf_int64 Bitrate = BitrateFor(W, H);
+            Encoder->SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, Bitrate);
+            Encoder->SetProperty(AMF_VIDEO_ENCODER_PEAK_BITRATE, Bitrate * 2);
+            Encoder->SetProperty(AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE, Bitrate / kRefresh * 2);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_FILLER_DATA_ENABLE, false);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_QUALITY_PRESET, AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED);
             Encoder->SetProperty(AMF_VIDEO_ENCODER_B_PIC_PATTERN, (amf_int64)0);
@@ -850,7 +863,7 @@ struct MfEncoder : FrameEncoder
             SetCodecValue(Codec.Get(), CODECAPI_AVLowLatencyMode, VT_BOOL, TRUE, "low-latency mode");
             // low-delay VBR rather than CBR: CBR pads frames with filler data, which freezes the dongle
             SetCodecValue(Codec.Get(), CODECAPI_AVEncCommonRateControlMode, VT_UI4, eAVEncCommonRateControlMode_LowDelayVBR, "low-delay VBR");
-            SetCodecValue(Codec.Get(), CODECAPI_AVEncCommonMeanBitRate, VT_UI4, (ULONG)kBitrate, "bitrate");
+            SetCodecValue(Codec.Get(), CODECAPI_AVEncCommonMeanBitRate, VT_UI4, (ULONG)BitrateFor(W, H), "bitrate");
             SetCodecValue(Codec.Get(), CODECAPI_AVEncMPVGOPSize, VT_UI4, kRefresh * 2, "GOP size");
             SetCodecValue(Codec.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, VT_UI4, 0, "no B-frames");
             SetCodecValue(Codec.Get(), CODECAPI_AVEncVideoMaxNumRefFrame, VT_UI4, 1, "1 reference frame");
@@ -867,7 +880,7 @@ struct MfEncoder : FrameEncoder
             MFCreateMediaType(&Out);
             Out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             Out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-            Out->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)kBitrate);
+            Out->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)BitrateFor(W, H));
             MFSetAttributeSize(Out.Get(), MF_MT_FRAME_SIZE, W, H);
             MFSetAttributeRatio(Out.Get(), MF_MT_FRAME_RATE, kRefresh, 1);
             MFSetAttributeRatio(Out.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -1872,10 +1885,10 @@ NTSTATUS DrongIddAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_IN_
 _Use_decl_annotations_
 NTSTATUS DrongIddParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION* pInArgs, IDARG_OUT_PARSEMONITORDESCRIPTION* pOutArgs)
 {
-    // Our only EDID describes exactly one mode: 1920x1080 @ 50 Hz.
-    pOutArgs->MonitorModeBufferOutputCount = 1;
+    // Our EDID stands for the modes in kModes, 1920x1080 @ 50 Hz preferred.
+    pOutArgs->MonitorModeBufferOutputCount = kModeCount;
 
-    if (pInArgs->MonitorModeBufferInputCount < 1)
+    if (pInArgs->MonitorModeBufferInputCount < kModeCount)
     {
         // Return success if there was no buffer, since the caller was only asking for a count of modes
         return (pInArgs->MonitorModeBufferInputCount > 0) ? STATUS_BUFFER_TOO_SMALL : STATUS_SUCCESS;
@@ -1887,7 +1900,11 @@ NTSTATUS DrongIddParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION*
         return STATUS_INVALID_PARAMETER;
     }
 
-    pInArgs->pMonitorModes[0] = CreateIddCxMonitorMode(kWidth, kHeight, kRefresh, IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR);
+    for (UINT i = 0; i < kModeCount; i++)
+    {
+        pInArgs->pMonitorModes[i] = CreateIddCxMonitorMode(kModes[i].Width, kModes[i].Height, kRefresh,
+                                                           IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR);
+    }
     pOutArgs->PreferredMonitorModeIdx = 0;
     return STATUS_SUCCESS;
 }
@@ -1898,10 +1915,14 @@ NTSTATUS DrongIddMonitorGetDefaultModes(IDDCX_MONITOR MonitorObject, const IDARG
     UNREFERENCED_PARAMETER(MonitorObject);
 
     // Only used for EDID-less monitors; ours always has an EDID, but answer consistently.
-    pOutArgs->DefaultMonitorModeBufferOutputCount = 1;
-    if (pInArgs->DefaultMonitorModeBufferInputCount > 0)
+    pOutArgs->DefaultMonitorModeBufferOutputCount = kModeCount;
+    if (pInArgs->DefaultMonitorModeBufferInputCount >= kModeCount)
     {
-        pInArgs->pDefaultMonitorModes[0] = CreateIddCxMonitorMode(kWidth, kHeight, kRefresh, IDDCX_MONITOR_MODE_ORIGIN_DRIVER);
+        for (UINT i = 0; i < kModeCount; i++)
+        {
+            pInArgs->pDefaultMonitorModes[i] = CreateIddCxMonitorMode(kModes[i].Width, kModes[i].Height, kRefresh,
+                                                                      IDDCX_MONITOR_MODE_ORIGIN_DRIVER);
+        }
         pOutArgs->PreferredMonitorModeIdx = 0;
     }
 
@@ -1913,13 +1934,14 @@ NTSTATUS DrongIddMonitorQueryModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_Q
 {
     UNREFERENCED_PARAMETER(MonitorObject);
 
-    // The dongle shows 1920x1080; 50 Hz keeps its frame queue from growing.
-    IDDCX_TARGET_MODE Mode = CreateIddCxTargetMode(kWidth, kHeight, kRefresh);
-
-    pOutArgs->TargetModeBufferOutputCount = 1;
-    if (pInArgs->TargetModeBufferInputCount >= 1)
+    // The dongle scales any of these to its HDMI output; 50 Hz keeps its frame queue from growing.
+    pOutArgs->TargetModeBufferOutputCount = kModeCount;
+    if (pInArgs->TargetModeBufferInputCount >= kModeCount)
     {
-        pInArgs->pTargetModes[0] = Mode;
+        for (UINT i = 0; i < kModeCount; i++)
+        {
+            pInArgs->pTargetModes[i] = CreateIddCxTargetMode(kModes[i].Width, kModes[i].Height, kRefresh);
+        }
     }
 
     return STATUS_SUCCESS;

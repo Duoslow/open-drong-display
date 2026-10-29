@@ -99,3 +99,5 @@ bytes 24..63  totalLen, chunkLen, nChunks, chunkIndex (1-based), 1, width, heigh
   is being written), the device's firmware may crash and drop off USB until it is power-cycled. Finish the frame in
   flight before stopping.
 - Multiple slices per frame and SEI NAL units are fine; access unit delimiters (type 9) are fine.
+- **Frame sizes:** 1920×1080, 1600×900 and 1280×720 streams all display (the device scales to its HDMI output);
+  the width/height in the `0x67` header follow the stream. Larger sizes were not tested.

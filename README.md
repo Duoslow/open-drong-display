@@ -5,8 +5,8 @@ replacement for the vendor software, which sends device and PC information to th
 (`ds.dronghootin.com.cn`), installs a self-signed root certificate and downloads adverts
 (see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md)).
 
-Plug the dongle in and Windows gets an extra monitor, **USB-Monitor (1920×1080 @ 50 Hz)**, that behaves like any
-other screen. Unplug it and the monitor goes away. No background program, no network access, no vendor code.
+Plug the dongle in and Windows gets an extra monitor, **USB-Monitor** (1920×1080, 1600×900 or 1280×720, at 50 Hz),
+that behaves like any other screen. Unplug it and the monitor goes away. No background program, no network access, no vendor code.
 
 > Not affiliated with or endorsed by the maker of the dongle. The USB protocol was reverse-engineered for
 > interoperability; see [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -62,10 +62,12 @@ Windows only loads drivers signed by a certificate it trusts, so the install scr
    The log is written to `driver\out\install.log`.
 
 USB-Monitor appears a few seconds later. Arrange it in *Settings → System → Display*; Windows remembers its position
-across replugs.
+across replugs. The resolution can be set there too: **1920×1080** (default), **1600×900** or **1280×720**, always
+at 50 Hz — the dongle scales the picture to its HDMI monitor.
 
-To update, run steps 3 and 4 again — every install gets a new driver version so Windows
-replaces the old one.
+To update, run steps 3 and 4 again — every install gets a new driver version so Windows replaces the old one.
+Swapping the driver resets the dongle, and occasionally it doesn't come back on its own; `install.ps1` checks for
+that and tells you to unplug and replug it.
 
 ### Uninstall
 

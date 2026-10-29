@@ -87,6 +87,7 @@ try {
 
     # 3. install (older packages are removed once the new one is on the device)
     $old = @(Get-OurPublishedInfs)
+    $logLines = @(Get-Content 'C:\ProgramData\drong-display\driver.log' -ErrorAction SilentlyContinue).Count
     pnputil /add-driver "$pkg\DrongIdd.inf"
     Add-Type -TypeDefinition @'
 using System;
@@ -111,6 +112,17 @@ public static class NewDev {
 
     # 5. the dongle's USB drive (vendor installer) and audio device are not needed
     if (-not $KeepExtras) { & "$PSScriptRoot\hide-extras.ps1" }
+
+    # 6. swapping the driver makes the dongle reset; occasionally it does not come back without a power cycle
+    $driverLog = 'C:\ProgramData\drong-display\driver.log'
+    $streaming = $false
+    for ($i = 0; $i -lt 20 -and -not $streaming; $i++) {
+        Start-Sleep 1
+        $new = Get-Content $driverLog -ErrorAction SilentlyContinue | Select-Object -Skip $logLines
+        $streaming = [bool]($new | Select-String -SimpleMatch 'streaming (')
+    }
+    if ($streaming) { Write-Output 'the dongle is streaming' }
+    else { Write-Output 'NOTE: the dongle did not come back after the driver update - unplug it, wait 5 s and plug it back in' }
 }
 catch { Write-Output "ERROR: $_" }
 finally { Stop-Transcript | Out-Null }
