@@ -16,6 +16,7 @@
 #include <dxgi1_5.h>
 #include <d3d11_2.h>
 #include <avrt.h>
+#include <timeapi.h>
 #include <wrl.h>
 
 #include <atomic>

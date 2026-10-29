@@ -1474,8 +1474,13 @@ void SwapChainProcessor::Run()
     // Media Foundation encoders are COM objects
     HRESULT ComInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+    // 1 ms timer resolution for this process while streaming: with the default 15.6 ms tick the 20 ms keep-alive
+    // wait lasts ~31 ms, and the dongle needs a steady ~50 fps on a still screen
+    timeBeginPeriod(1);
+
     RunCore();
 
+    timeEndPeriod(1);
     if (SUCCEEDED(ComInit))
     {
         CoUninitialize();

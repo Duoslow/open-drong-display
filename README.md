@@ -78,14 +78,16 @@ until you install one again.
 
 ### Optional: hide the dongle's USB drive and audio device
 
-The dongle also exposes a small USB drive (holding the vendor installer) and an audio device. If you don't want them,
-disable *USB Mass Storage Device* and *Drong USB Audio Device* under the dongle in Device Manager, or:
+The dongle also exposes a small USB drive (holding the vendor installer) and an audio device. To hide both on every
+USB port, run (from an **administrator** PowerShell):
 
-```powershell
-Get-PnpDevice -PresentOnly | ? InstanceId -match 'VID_1CBE&PID_0003&MI_0[13]' | Disable-PnpDevice -Confirm:$false
+```
+powershell -ExecutionPolicy Bypass -File driver\hide-extras.ps1          (-Undo to bring them back)
 ```
 
-(Disabled devices are remembered per USB port.)
+It uses Windows' device installation policy (*Prevent installation of devices that match these device IDs*) for
+exactly these two interfaces, `USB\VID_1CBE&PID_0003&MI_01` and `…&MI_03`; the display and other devices are not
+affected. (Disabling them in Device Manager also works, but only for the USB port they are plugged into.)
 
 ## Video encoders
 
@@ -125,7 +127,7 @@ with `ffplay` to see exactly what was sent.
 
 | Symptom | Cause / fix |
 |---|---|
-| Black screen on the dongle's monitor | Check the log for `streaming` and the fps line. If the dongle stopped answering (`usb frame write failed`, `not answering`), unplug it, wait 5 s and plug it back in. |
+| Black screen on the dongle's monitor | Check the log for `streaming` and the fps line (a still screen should show ~45–50 fps; the dongle goes black when it gets much less). Check the monitor is on the right HDMI input — the `device info` line shows the monitor the dongle detected (`"monitor":"unknow"` = none). If the dongle stopped answering (`usb frame write failed`, `not answering`), unplug it, wait 5 s and plug it back in. |
 | Delay grows over time | The dongle drains frames at only ~50/s; the driver's 50 Hz mode keeps below that. Don't raise the refresh rate. |
 | USB-Monitor missing | Device Manager → *Display adapters* → *Drong USB Display (USB-Monitor)* should be present without a warning sign. Re-run `install.ps1`. |
 | `install.ps1`: *UpdateDriverForPlugAndPlayDevices failed* | The dongle wasn't plugged in. |
