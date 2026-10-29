@@ -9,7 +9,7 @@ executed). It explains why this project exists; it is not a malware verdict.
 | | |
 |---|---|
 | File | `Drong Display.exe`, 8,641,957 bytes, version 1.0.8, "Copyright (C) 2024 Drong" |
-| SHA-256 | `35C9BA5218BDA38D743AB9DA18B850344C21B2643EC8B8115917FA34A3F77296` |
+| SHA-256 | `35C9BA5218BDA38D743AB9DA18B850344C21B2643EC8B8115917FA34A3F77296` ([VirusTotal](https://www.virustotal.com/gui/file/35c9ba5218bda38d743ab9da18b850344c21b2643ec8b8115917fa34a3f77296/detection)) |
 | Signature | none |
 | Type | Advanced Installer bootstrapper with two embedded 7z archives (first 0x200 bytes XOR 0xFF): `FILES.7z` and `Drong Display.7z` (an MSI) |
 
