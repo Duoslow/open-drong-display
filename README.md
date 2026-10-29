@@ -132,6 +132,10 @@ whose key lives somewhere else. Each install replaces the previous certificate; 
 No test-signing mode is needed: this is a user-mode (UMDF) driver, which Windows checks against the trusted
 certificate stores rather than Microsoft's kernel-mode signing requirements.
 
+The released driver binary scans clean on
+[VirusTotal (0/69)](https://www.virustotal.com/gui/file/af3e793aba07e454d8313b1f6209db19b4017d87692b99524bcb51491b1575f2/detection).
+Building from source produces your own binary with a different hash, which you can scan yourself.
+
 ## Troubleshooting
 
 The driver logs to `C:\ProgramData\drong-display\driver.log` (handshake, device info, stream statistics every 30 s).
