@@ -3,8 +3,9 @@
 An open-source Windows display driver for the **"Drong Display" USB screen dongle** (USB `1CBE:0003`) — a
 replacement for the vendor software, which sends device and PC information to the vendor's server
 (`ds.dronghootin.com.cn`), installs a self-signed root certificate and downloads adverts
-(see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md), and the vendor installer on
-[VirusTotal](https://www.virustotal.com/gui/file/35c9ba5218bda38d743ab9da18b850344c21b2643ec8b8115917fa34a3f77296/detection)).
+(see [docs/VENDOR-SOFTWARE.md](docs/VENDOR-SOFTWARE.md); the vendor installer is flagged by
+[9/71 engines on VirusTotal](https://www.virustotal.com/gui/file/35c9ba5218bda38d743ab9da18b850344c21b2643ec8b8115917fa34a3f77296/detection),
+versus [0/69 for this driver](https://www.virustotal.com/gui/file/af3e793aba07e454d8313b1f6209db19b4017d87692b99524bcb51491b1575f2/detection)).
 
 Plug the dongle in and Windows gets an extra monitor, **USB-Monitor** (1920×1080, 1600×900 or 1280×720, at 50 Hz),
 that behaves like any other screen. Unplug it and the monitor goes away. No background program, no network access, no vendor code.
