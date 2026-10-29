@@ -1,7 +1,8 @@
 # Hides the dongle's USB drive (interface 3, holds the vendor installer) and its audio device (interface 1) on every
 # USB port, using Windows' device installation policy "Prevent installation of devices that match these device IDs".
 # Only these two interfaces of USB 1CBE:0003 are affected; the display (interface 0) and all other devices are not.
-# Run elevated.   -Undo removes the policy entries and re-enables the interfaces.
+# Called by install.ps1 (and with -Undo by install.ps1 -Uninstall); can also be run on its own, elevated.
+#   -Undo removes the policy entries and re-enables the interfaces.
 param([switch]$Undo)
 $ErrorActionPreference = 'Stop'
 $Ids = 'USB\VID_1CBE&PID_0003&MI_01', 'USB\VID_1CBE&PID_0003&MI_03'

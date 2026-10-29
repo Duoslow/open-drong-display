@@ -73,21 +73,18 @@ replaces the old one.
 powershell -ExecutionPolicy Bypass -File driver\install.ps1 -Uninstall
 ```
 
-removes the driver package and the signing certificates. The dongle's display interface is then without a driver
-until you install one again.
+removes the driver package and the signing certificates and brings the dongle's USB drive and audio device back.
+The dongle's display interface is then without a driver until you install one again.
 
-### Optional: hide the dongle's USB drive and audio device
+### The dongle's USB drive and audio device
 
-The dongle also exposes a small USB drive (holding the vendor installer) and an audio device. To hide both on every
-USB port, run (from an **administrator** PowerShell):
+Besides the display, the dongle exposes a small USB drive (holding the vendor installer) and an audio device.
+`install.ps1` hides both on every USB port; pass `-KeepExtras` to keep them.
 
-```
-powershell -ExecutionPolicy Bypass -File driver\hide-extras.ps1          (-Undo to bring them back)
-```
-
-It uses Windows' device installation policy (*Prevent installation of devices that match these device IDs*) for
+This uses Windows' device installation policy (*Prevent installation of devices that match these device IDs*) for
 exactly these two interfaces, `USB\VID_1CBE&PID_0003&MI_01` and `…&MI_03`; the display and other devices are not
-affected. (Disabling them in Device Manager also works, but only for the USB port they are plugged into.)
+affected. It is done by the installer rather than the driver because a display driver runs with too few rights to
+switch other devices off. `driver\hide-extras.ps1` (with `-Undo`) does the same on its own.
 
 ## Video encoders
 

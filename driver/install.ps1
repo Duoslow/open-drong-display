@@ -5,11 +5,13 @@
 #      so nothing else can ever be signed with it
 #   3. installs the driver package and forces it onto the dongle's display interface (USB\VID_1CBE&PID_0003&MI_00)
 #   4. disables the Virtual Display Driver (alternative\virtual-display) if present, which this driver replaces
+#   5. hides the dongle's USB drive and audio device on every USB port (hide-extras.ps1); -KeepExtras skips this
 #
-#   -Uninstall removes the driver package and the certificates again and re-enables the Virtual Display Driver.
+#   -Uninstall removes the driver package and the certificates again, brings the USB drive and audio device back
+#   and re-enables the Virtual Display Driver.
 #
 #   Needs the Windows Driver Kit 10.0.26100 (signtool, Inf2Cat) and the dongle plugged in.
-param([switch]$Uninstall, [string]$Log = "$PSScriptRoot\out\install.log")
+param([switch]$Uninstall, [switch]$KeepExtras, [string]$Log = "$PSScriptRoot\out\install.log")
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force "$PSScriptRoot\out" | Out-Null
 Start-Transcript -Path $Log -Force | Out-Null
@@ -34,6 +36,7 @@ try {
         foreach ($inf in Get-OurPublishedInfs) { Write-Output "removing driver package $inf"; pnputil /delete-driver $inf /uninstall /force }
         Remove-OurCerts -Keep ''
         if ($vdd) { Enable-PnpDevice -InstanceId $vdd.InstanceId -Confirm:$false; Write-Output 'Virtual Display Driver re-enabled' }
+        & "$PSScriptRoot\hide-extras.ps1" -Undo
         Write-Output 'uninstalled. For the user-mode alternative, bind WinUSB to "windows mirroring interface" (see alternative\README.md).'
         return
     }
@@ -105,6 +108,9 @@ public static class NewDev {
 
     # 4. one USB-Monitor is enough
     if ($vdd -and $vdd.Status -eq 'OK') { Disable-PnpDevice -InstanceId $vdd.InstanceId -Confirm:$false; Write-Output 'Virtual Display Driver disabled' }
+
+    # 5. the dongle's USB drive (vendor installer) and audio device are not needed
+    if (-not $KeepExtras) { & "$PSScriptRoot\hide-extras.ps1" }
 }
 catch { Write-Output "ERROR: $_" }
 finally { Stop-Transcript | Out-Null }
